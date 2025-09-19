@@ -1,3 +1,4 @@
+from argparse import Action
 import os
 import streamlit as st
 from dotenv import load_dotenv
@@ -6,13 +7,11 @@ import db
 from wallet_utils import (
     get_all_wallets,
     init_wallets,
-    NETWORK_NAMES,
-    NETWORK_LOGOS,
-    BALANCE_SYMBOLS,
+    NETWORK_NAMES
 )
+from config import NETWORK_LOGOS, BALANCE_SYMBOLS
 from web3 import Web3
 from typing import Optional
-
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -49,15 +48,16 @@ def render():
     # Safe display of .env wallet address
     wallet_display = (
         f"{WALLET_ADDRESS[:6]}...{WALLET_ADDRESS[-4:]}"
-        if isinstance(WALLET_ADDRESS, str) and len(WALLET_ADDRESS) >= 10
+        if isinstance(WALLET_ADDRESS, str) and len(WALLET_ADDRESS) > 10
         else "Not set"
     )
 
-    # Inject MetaMask and WalletConnect logic
+    # Inject MetaMask and WalletConnect logic (embedded JS, no separate file)
     st.markdown(
         f"""
         <!-- WalletConnect Modal -->
         <script src="https://unpkg.com/@walletconnect/modal@2.6.2/dist/index.umd.js"></script>
+        <script src="https://cdn.ethers.io/lib/ethers-5.7.umd.min.js"></script>
 
         <button id="connectButton"
             style="background: linear-gradient(to right, #6366f1, #3b82f6);
@@ -71,200 +71,347 @@ def render():
         </p>
 
         <script>
-        const walletAddress = document.getElementById('walletAddress');
-        const connectButton = document.getElementById('connectButton');
-
-        async function connectMetaMaskDirect() {{
-            try {{
-                const accounts = await window.ethereum.request({{ method: 'eth_requestAccounts' }});
-                const account = accounts[0];
-                const chainId = await window.ethereum.request({{ method: 'eth_chainId' }});
-                walletAddress.innerText = "Connected via MetaMask: " + account;
-                window.lastMessage = {{ type: "streamlit:walletConnected", account, chainId }};
-                window.parent.postMessage(window.lastMessage, window.location.origin);
-            }} catch (err) {{
-                console.error(err);
-                walletAddress.innerText = "❌ MetaMask connection failed: " + err.message;
+        class MetaMaskConnector {{
+            constructor() {{
+                this.isConnected = false;
+                this.account = null;
+                this.chainId = null;
+                this.networkMap = {{
+                    '0x1': 'ethereum',
+                    '0x38': 'bsc',
+                    '0xa4b1': 'arbitrum',
+                    '0xa': 'optimism',
+                    '0x2105': 'base',
+                    '0xa86a': 'avalanche',
+                    '0xe9ac0ce': 'neon',
+                    '0x89': 'polygon',
+                    '0xfa': 'fantom',
+                    '0x63564c40': 'solana',
+                    '0x4e454152': 'aurora',
+                    '0x19': 'cronos'
+                }};
+                this.ethersProvider = null;
+                this.targetOrigin = window.location.origin;
             }}
-        }}
 
-        async function connectWithWalletConnect() {{
-            try {{
-                const modal = new window.WalletConnectModal.WalletConnectModal({{
-                    projectId: "{WALLET_CONNECT_PROJECT_ID}",
-                    chains: [1, 56, 42161, 10, 8453, 43114, 245022934],
-                    themeMode: "dark",
-                    explorerExcludedWalletIds: "ALL",
-                    explorerRecommendedWalletIds: [
-                        "c5f6866f-3d9b-477e-9b5c-0b1b1b5c4e8c" // MetaMask ID
-                    ]
-                }});
-
-                const session = await modal.connect();
-                const account = session?.namespaces?.eip155?.accounts?.[0]?.split(':')[2] || null;
-                const chainId = session?.namespaces?.eip155?.chains?.[0] || '0x1';
-
-                if (account) {{
-                    walletAddress.innerText = "Connected via WalletConnect: " + account;
-                    window.lastMessage = {{ type: "streamlit:walletConnected", account, chainId }};
-                    window.parent.postMessage(window.lastMessage, window.location.origin);
-                }} else {{
-                    walletAddress.innerText = "❌ WalletConnect failed: No account found";
+            async checkMetaMaskAvailable() {{
+                if (typeof window.ethereum !== 'undefined' && typeof window.ethers !== 'undefined') {{
+                    this.ethersProvider = new ethers.providers.Web3Provider(window.ethereum);
+                    return true;
                 }}
-            }} catch (err) {{
-                console.error(err);
-                walletAddress.innerText = "❌ WalletConnect connection failed: " + err.message;
+                throw new Error('MetaMask or ethers.js not installed. Please install MetaMask extension.');
+            }}
+
+            async connectWallet() {{
+                try {{
+                    await this.checkMetaMaskAvailable();
+                    const accounts = await window.ethereum.request({{ method: 'eth_requestAccounts' }});
+                    this.account = accounts[0];
+                    this.chainId = await window.ethereum.request({{ method: 'eth_chainId' }});
+                    this.isConnected = true;
+
+                    const result = {{
+                        type: 'streamlit:walletConnected',
+                        account: this.account,
+                        chainId: this.chainId,
+                        network: this.networkMap[this.chainId] || 'unknown'
+                    }};
+                    window.lastMessage = result;
+                    window.parent.postMessage(result, this.targetOrigin);
+
+                    window.ethereum.on('accountsChanged', this.handleAccountsChanged.bind(this));
+                    window.ethereum.on('chainChanged', this.handleChainChanged.bind(this));
+
+                    return result;
+                }} catch (error) {{
+                    const errorMsg = {{
+                        type: 'streamlit:walletError',
+                        error: error.message,
+                        code: error.code || 'UNKNOWN_ERROR'
+                    }};
+                    window.lastMessage = errorMsg;
+                    window.parent.postMessage(errorMsg, this.targetOrigin);
+                    throw error;
+                }}
+            }}
+
+            async connectWalletConnect(projectId) {{
+                try {{
+                    const {{ WalletConnectModal }} = window.WalletConnectModal;
+                    const modal = new WalletConnectModal({{
+                        projectId: projectId,
+                        chains: [
+                            1,      // Ethereum
+                            56,     // BSC
+                            42161,  // Arbitrum
+                            10,     // Optimism
+                            8453,   // Base
+                            43114,  // Avalanche
+                            245022934, // Neon
+                            137,    // Polygon
+                            250,    // Fantom
+                            756260, // Solana (if supported)
+                            1313161554, // Aurora
+                            25      // Cronos
+                        ]
+                    }});
+
+                    const {{ uri }} = await modal.openModal();
+                    console.log('WalletConnect URI:', uri);
+
+                    modal.subscribeModal((data) => {{
+                        if (data && data.account && data.chainId) {{
+                            this.account = data.account;
+                            this.chainId = data.chainId;
+                            this.isConnected = true;
+
+                            const result = {{
+                                type: 'streamlit:walletConnected',
+                                account: data.account,
+                                chainId: data.chainId,
+                                network: this.networkMap[data.chainId] || 'unknown'
+                            }};
+                            window.lastMessage = result;
+                            window.parent.postMessage(result, this.targetOrigin);
+                        }}
+                    }});
+
+                    return {{ message: 'WalletConnect modal opened' }};
+                }} catch (error) {{
+                    const errorMsg = {{
+                        type: 'streamlit:walletError',
+                        error: error.message,
+                        code: error.code || 'UNKNOWN_ERROR'
+                    }};
+                    window.lastMessage = errorMsg;
+                    window.parent.postMessage(errorMsg, this.targetOrigin);
+                    throw error;
+                }}
+            }}
+
+            async performDeFiAction(action, txData) {{
+                try {{
+                    if (!this.isConnected || !this.ethersProvider) {{
+                        throw new Error('Wallet not connected');
+                    }}
+                    const signer = this.ethersProvider.getSigner();
+                    const tx = await signer.sendTransaction(txData);
+                    const receipt = await tx.wait();
+                    const result = {{
+                        type: 'streamlit:txSuccess',
+                        txHash: receipt.transactionHash
+                    }};
+                    window.lastMessage = result;
+                    window.parent.postMessage(result, this.targetOrigin);
+                    return result;
+                }} catch (error) {{
+                    const errorMsg = {{
+                        type: 'streamlit:txError',
+                        error: error.message,
+                        code: error.code || 'UNKNOWN_ERROR'
+                    }};
+                    window.lastMessage = errorMsg;
+                    window.parent.postMessage(errorMsg, this.targetOrigin);
+                    throw error;
+                }}
+            }}
+
+            handleAccountsChanged(accounts) {{
+                this.isConnected = accounts.length > 0;
+                this.account = accounts.length > 0 ? accounts[0] : null;
+
+                const msg = {{
+                    type: 'streamlit:accountsChanged',
+                    account: this.account,
+                    chainId: this.chainId,
+                    network: this.networkMap[this.chainId] || 'unknown'
+                }};
+                window.lastMessage = msg;
+                window.parent.postMessage(msg, this.targetOrigin);
+            }}
+
+            handleChainChanged(chainId) {{
+                this.chainId = chainId;
+
+                const msg = {{
+                    type: 'streamlit:chainChanged',
+                    chainId: chainId,
+                    network: this.networkMap[chainId] || 'unknown'
+                }};
+                window.lastMessage = msg;
+                window.parent.postMessage(msg, this.targetOrigin);
+            }}
+
+            disconnect() {{
+                this.isConnected = false;
+                this.account = null;
+                this.chainId = null;
+
+                if (window.ethereum) {{
+                    window.ethereum.removeListener('accountsChanged', this.handleAccountsChanged.bind(this));
+                    window.ethereum.removeListener('chainChanged', this.handleChainChanged.bind(this));
+                }}
+                this.ethersProvider = null;
+
+                const msg = {{ type: 'streamlit:disconnected' }};
+                window.lastMessage = msg;
+                window.parent.postMessage(msg, this.targetOrigin);
             }}
         }}
 
-        connectButton.onclick = async () => {{
-            if (typeof window.ethereum !== 'undefined') {{
-                await connectMetaMaskDirect();
-            }} else {{
-                await connectWithWalletConnect();
+        window.metamaskConnector = new MetaMaskConnector();
+
+        document.getElementById('connectButton').addEventListener('click', async () => {{
+            try {{
+                await window.metamaskConnector.connectWallet();
+            }} catch (error) {{
+                console.error('Connection failed:', error);
+            }}
+        }});
+
+        window.performDeFiAction = async (action, txData) => {{
+            try {{
+                return await window.metamaskConnector.performDeFiAction(action, txData);
+            }} catch (error) {{
+                console.error(`${Action} failed:`, error);
+                throw error;
             }}
         }};
         </script>
         """,
         unsafe_allow_html=True,
-    )  # type: ignore
-
-    # Initialize session state
-    if 'wallets' not in st.session_state:
-        try:
-            init_wallets(st.session_state)
-        except Exception as e:
-            st.warning(f"Failed to initialize wallets: {e}")
-
-    # Fetch last wallet connection
-    msg = get_post_message()
-    connected_address = msg.get("account")
-    chain_id = msg.get("chainId")
-    chain_map = {
-        '0x1': 'ethereum',
-        '0x38': 'bsc',
-        '0xa4b1': 'arbitrum',
-        '0xa': 'optimism',
-        '0x2105': 'base',
-        '0xa86a': 'avalanche',
-        '0xe9ac0ce': 'neon'
-    }
-    connected_chain = chain_map.get(chain_id, 'ethereum') if chain_id else None
-
-    # Save connected wallet to DB
-    if msg.get("type") == "streamlit:walletConnected" and connected_address and connected_chain:
-        try:
-            connected_address = Web3.to_checksum_address(connected_address)
-            wallet_id = f"{connected_chain}_{connected_address}"
-            db.save_wallet(
-                wallet_id=wallet_id,
-                chain=connected_chain,
-                address=connected_address,
-                connected=True,
-                verified=False,
-                balance=0.0,
-                nonce=None,
-            )
-            wallet = st.session_state.wallets.get(connected_chain)
-            if wallet:
-                wallet.connect(connected_address)
-        except Exception as e:
-            st.error(f"Failed to save wallet connection: {e}")
-
-    # Render wallet cards with default values if None
-    render_wallet_cards(
-        connected_address if isinstance(connected_address, str) else "",
-        connected_chain if isinstance(connected_chain, str) else ""
     )
 
-# --- Utility: get postMessage safely ---
-def get_post_message() -> dict:
+    # Fetch connected chain and address from JS
+    connected_address = None
+    connected_chain = None
+    response = st_javascript("return window.lastMessage || {}")
+    if isinstance(response, dict) and response.get("type") == "streamlit:walletConnected":
+        connected_address = response.get("account")
+        connected_chain = response.get("network")
+
+    # Initialize default wallets if not present
     try:
-        res = st_javascript("return window.lastMessage || {}")
-        return res if isinstance(res, dict) else {}
-    except Exception:
-        return {}
-
-# --- Render Wallet Cards ---
-def render_wallet_cards(connected_address: Optional[str], connected_chain: Optional[str]):
-    st.markdown(
-        """
-        <div style='
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); 
-            gap: 1.2rem; 
-            padding: 1rem;
-        '>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    wallets = get_all_wallets(st.session_state) or []
-    if not wallets and WALLET_ADDRESS:
-        try:
-            checksum_address = Web3.to_checksum_address(WALLET_ADDRESS)
+        if 'wallets' not in st.session_state:
+            init_wallets(st.session_state)
             for chain in NETWORK_NAMES.keys():
-                db.save_wallet(
-                    wallet_id=f"{chain}_{checksum_address}",
+                checksum_address = Web3.to_checksum_address(WALLET_ADDRESS) # type: ignore
+                st.session_state.wallets[chain] = db.Wallet(
                     chain=chain,
                     address=checksum_address,
-                    connected=(chain == connected_chain and connected_address == checksum_address),
+                    connected=(connected_chain == chain and connected_address == checksum_address),
                     verified=False,
                     balance=0.0,
                     nonce=None,
                 )
             wallets = get_all_wallets(st.session_state)
-        except Exception as e:
-            st.error(f"Failed to initialize default wallets: {e}")
+    except Exception as e:
+        st.error(f"Failed to initialize default wallets: {e}")
 
-    if not wallets:
+    if not st.session_state.get('wallets'):
         st.info("No wallets available.")
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    for wallet in wallets:
-        chain = getattr(wallet, "chain", "unknown")
-        logo_url = NETWORK_LOGOS.get(chain, "https://via.placeholder.com/32?text=Logo")
-        chain_name = NETWORK_NAMES.get(chain, chain.capitalize())
-        address = getattr(wallet, "address", None)
-        balance_val = getattr(wallet, "balance", 0.0) or 0.0
-        balance_display = f"{balance_val:.4f} {BALANCE_SYMBOLS.get(chain, 'Native')}"
-        address_display = (address[:6] + "..." + address[-4:]) if address else "Not connected"
-        connection_status = (
-            "MetaMask/WalletConnect"
-            if chain == connected_chain and address == connected_address
-            else ".env" if address else "Disconnected"
-        )
+    # Tabs for Wallets
+    tab_active, tab_disconnected = st.tabs(["Active Wallets", "Disconnected Wallets"])
 
-        st.markdown(
-            f"""
-            <div style='
-                background: linear-gradient(135deg, rgba(49,46,129,0.3), rgba(30,64,175,0.3));
-                border-radius: 16px;
-                padding: 1rem;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-            '>
-                <div style="display:flex; align-items:center; margin-bottom:0.75rem;">
-                    <img src="{logo_url}" alt="{chain_name}" style="width:32px; height:32px; border-radius:50%; margin-right:0.6rem;">
-                    <h3 style="margin:0; font-size:1rem; font-weight:600; color:#c7d2fe;">
-                        {chain_name}
-                    </h3>
-                </div>
-                <div style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.75rem;">
-                    <p>Status: {'✅ Connected via ' + connection_status if wallet.connected else '❌ Disconnected'}</p>
-                    <p>Address: {address_display}</p>
-                    <p>Balance: {balance_display}</p>
-                </div>
-                <button onclick="document.getElementById('disconnect_{chain}').click()" style="background: #ef4444; border:none; padding:8px 16px; border-radius:8px; color:white; font-size:0.8rem; cursor:pointer;">
-                    Disconnect
-                </button>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("Disconnect", key=f"disconnect_{chain}"):
-            wallet.disconnect()
-            st.rerun()
+    with tab_active:
+        active_wallets = [w for w in st.session_state.wallets.values() if w.connected]
+        if not active_wallets:
+            st.info("No active wallets.")
+        else:
+            st.markdown(
+                """
+                <style>
+                    .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            for wallet in active_wallets:
+                chain = wallet.chain
+                logo_url = NETWORK_LOGOS.get(chain, "https://via.placeholder.com/32?text=Logo")
+                chain_name = NETWORK_NAMES.get(chain, chain.capitalize())
+                address = wallet.address
+                balance_val = wallet.balance or 0.0
+                balance_display = f"{balance_val:.4f} {BALANCE_SYMBOLS.get(chain, 'Native')}"
+                address_display = (address[:6] + "..." + address[-4:]) if address else "Not connected"
+                connection_status = "MetaMask/WalletConnect" if chain == connected_chain and address == connected_address else ".env"
+
+                st.markdown(
+                    f"""
+                    <div class="card">
+                        <div style="display:flex; align-items:center; margin-bottom:0.75rem;">
+                            <img src="{logo_url}" alt="{chain_name}" style="width:32px; height:32px; border-radius:50%; margin-right:0.6rem;">
+                            <h3 style="margin:0; font-size:1rem; font-weight:600; color:#c7d2fe;">
+                                {chain_name}
+                            </h3>
+                        </div>
+                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                            Status: ✅ Connected via {connection_status}
+                        </p>
+                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                            Address: {address_display}
+                        </p>
+                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                            Balance: {balance_display}
+                        </p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                if st.button("Disconnect", key=f"disconnect_active_{chain}"):
+                    wallet.disconnect()
+                    st.rerun()
+
+    with tab_disconnected:
+        disconnected_wallets = [w for w in st.session_state.wallets.values() if not w.connected]
+        if not disconnected_wallets:
+            st.info("No disconnected wallets.")
+        else:
+            st.markdown(
+                """
+                <style>
+                    .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            for wallet in disconnected_wallets:
+                chain = wallet.chain
+                logo_url = NETWORK_LOGOS.get(chain, "https://via.placeholder.com/32?text=Logo")
+                chain_name = NETWORK_NAMES.get(chain, chain.capitalize())
+                address = wallet.address
+                address_display = (address[:6] + "..." + address[-4:]) if address else "Not connected"
+
+                st.markdown(
+                    f"""
+                    <div class="card">
+                        <div style="display:flex; align-items:center; margin-bottom:0.75rem;">
+                            <img src="{logo_url}" alt="{chain_name}" style="width:32px; height:32px; border-radius:50%; margin-right:0.6rem;">
+                            <h3 style="margin:0; font-size:1rem; font-weight:600; color:#c7d2fe;">
+                                {chain_name}
+                            </h3>
+                        </div>
+                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                            Status: ❌ Disconnected
+                        </p>
+                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                            Address: {address_display}
+                        </p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                address_input = st.text_input("Enter Wallet Address to Connect", key=f"addr_{chain}")
+                if st.button("Connect", key=f"connect_{chain}"):
+                    try:
+                        wallet.connect(address_input)
+                        st.success("Wallet connected.")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
 
     st.markdown("</div>", unsafe_allow_html=True)
 

@@ -10,6 +10,8 @@ import asyncio
 import inspect
 import subprocess
 import sys
+import atexit
+import signal  # Fixed: signal was missing
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -17,7 +19,7 @@ load_dotenv()
 # --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
-    filename="app.log",
+    filename="logs/app.log",
     filemode="a",
     format="%(asctime)s - %(levelname)s - %(message)s",
     encoding="utf-8"
@@ -26,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 # --- Start defi_scanner.py at startup ---
 try:
-    subprocess.Popen([sys.executable, "defi_scanner.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = subprocess.Popen([sys.executable, "defi_scanner.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    atexit.register(lambda: os.kill(p.pid, signal.SIGTERM) if p.poll() is None else None)
     logger.info("Started defi_scanner.py successfully.")
 except Exception as e:
     logger.error(f"Failed to start defi_scanner.py: {e}")
@@ -43,7 +46,7 @@ else:
 
 # --- Page Config ---
 st.set_page_config(
-    page_title="💰 DeFi Dashboard",
+    page_title="💰 DeFiVaultPro Dashboard",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -52,7 +55,7 @@ st.set_page_config(
 # --- App Header and Description ---
 st.markdown(
     """
-    # 💰 DeFi Dashboard
+    # 💰 DeFiVaultPro Dashboard
     **Real-time multi-chain DeFi scanner**  
     Track top yield opportunities, meme coins, and your wallet positions.  
     Powered by MetaMask & Web3 for secure, fast interactions.
@@ -117,9 +120,9 @@ st.sidebar.markdown("<h3 style='color:#6366f1;'>Navigation</h3>", unsafe_allow_h
 for page_name in PAGE_MODULES.keys():
     if st.sidebar.button(page_name, key=page_name):
         st.session_state.selected_page = page_name
-        st.rerun()  # Correct rerun
+        st.rerun()  # Proper rerun for Streamlit
 
-# --- Load the selected page ---
+# --- Load the selected page with proper async handling ---
 def load_page(selected_page: str):
     module_name = PAGE_MODULES.get(selected_page)
     if not module_name:
@@ -129,26 +132,32 @@ def load_page(selected_page: str):
     try:
         page_module = importlib.import_module(module_name)
         render_func = getattr(page_module, "render", None)
-        if callable(render_func):
-            if inspect.iscoroutinefunction(render_func):
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(render_func())
-                    else:
-                        asyncio.run(render_func())
-                except RuntimeError as e:
-                    logger.error(f"Async execution error: {e}")
-                    st.error(f"Failed to load async page: {selected_page}")
-            else:
-                render_func()
-        else:
+
+        if not callable(render_func):
             st.warning(f"Module {selected_page} loaded but no render() found.")
+            return
+
+        if inspect.iscoroutinefunction(render_func):
+            # Run coroutine safely without blocking Streamlit
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(render_func())
+                else:
+                    asyncio.run(render_func())
+            except RuntimeError as e:
+                logger.error(f"Async execution error: {e}")
+                st.error(f"Failed to load async page: {selected_page}")
+        else:
+            render_func()
+
     except ImportError as e:
         st.error(f"Failed to load page: {selected_page}. Error: {str(e)}")
     except Exception as e:
-        st.error(f"Error rendering page: {str(e)}")
+        logger.exception(f"Error rendering page {selected_page}: {e}")
+        st.error(f"Error rendering page {selected_page}: {str(e)}")
 
+# --- Load the currently selected page ---
 load_page(st.session_state.selected_page)
 
 # --- Sidebar Footer ---
@@ -156,7 +165,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("""
 <div style="text-align: center; color: #64748b; font-size: 0.8rem;">
     <p>🔒 Secure • 🌐 Multi-Chain • ⚡ Fast</p>
-    <p>Powered by MetaMask & Web3 | Streamlit v1.49.0</p>
-    <p>Developed by PHEMCODE</p>
+    <p>Powered by MetaMask & Web3 | Streamlit</p>
+    <p>Developed by CyberTrendHub</p>
 </div>
 """, unsafe_allow_html=True)

@@ -6,6 +6,7 @@ from typing import List
 import aiohttp
 import db
 import logging
+import config  # New import for centralized config
 
 # ---------------------------------
 # Logging setup
@@ -59,13 +60,14 @@ class MemeEntry:
     pool_id: str
 
 # ---------------------------------
-# Config
+# Config (from config.py)
 # ---------------------------------
-MIN_APY = 5
-MIN_TVL = 100_000
-FOCUS_PROTOCOLS = ["aave", "compound", "uniswap", "curve"]
-MEME_CHAINS = ["ethereum", "bsc", "solana"]
-RESCAN_INTERVAL = 3600  # 1 hour
+MIN_APY = config.MIN_APY
+MIN_TVL = config.MIN_TVL
+FOCUS_PROTOCOLS = config.FOCUS_PROTOCOLS
+MEME_CHAINS = config.MEME_CHAINS
+RESCAN_INTERVAL = config.RESCAN_INTERVAL
+CHAIN_RISK_SCORES = {"ethereum": 0.5, "bsc": 1.0, "solana": 1.5}  # Example enhancement
 
 # ---------------------------------
 # Utils
@@ -76,19 +78,21 @@ async def async_request(url: str) -> dict:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    resp.raise_for_status()  # Raise on HTTP error
                     return await resp.json()
-        except Exception as e:
+        except aiohttp.ClientError as e:
+            logging.error(f"Request to {url} failed (attempt {attempt+1}): {e}")
             if attempt == retries - 1:
-                logging.error(f"Failed request to {url}: {e}")
                 return {"error": str(e)}
-            await asyncio.sleep(1)
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
     return {"error": "All retries failed"}
 
-def risk_score(apy: float, tvl: float, project: str) -> float:
+def risk_score(apy: float, tvl: float, project: str, chain: str) -> float:
     score = 1.0
     if apy > 20: score += 1
     if tvl < 1_000_000: score += 1
     if project.lower() not in FOCUS_PROTOCOLS: score += 0.5
+    score += CHAIN_RISK_SCORES.get(chain.lower(), 1.0)  # Enhanced with chain risk
     return score
 
 async def estimate_gas_fee(chain: str) -> dict:
@@ -98,7 +102,7 @@ async def estimate_gas_fee(chain: str) -> dict:
 # Fetch Yields
 # ---------------------------------
 async def fetch_yields() -> List[YieldEntry]:
-    url = "https://yields.llama.fi/pools"
+    url = config.YIELDS_API_URL  # From config
     data = await async_request(url)
     if "error" in data:
         return []
@@ -111,7 +115,7 @@ async def fetch_yields() -> List[YieldEntry]:
             and pool.get("project", "").lower() in FOCUS_PROTOCOLS
         ):
             gas_info = await estimate_gas_fee(pool.get("chain", "").lower())
-            ror = pool.get("apy", 0) / risk_score(pool.get("apy", 0), pool.get("tvlUsd", 0), pool.get("project", ""))
+            ror = pool.get("apy", 0) / risk_score(pool.get("apy", 0), pool.get("tvlUsd", 0), pool.get("project", ""), pool.get("chain", ""))
 
             link = pool.get("url") or f"https://defillama.com/yields/pool/{pool.get('pool', '')}"
 
@@ -144,7 +148,7 @@ async def fetch_yields() -> List[YieldEntry]:
 # ---------------------------------
 async def fetch_meme_coins() -> List[MemeEntry]:
     queries = ["pepe", "doge", "shiba", "floki", "bonk", "wif", "popcat"]
-    results = await asyncio.gather(*(async_request(f"https://api.dexscreener.com/latest/dex/search?q={q}") for q in queries))
+    results = await asyncio.gather(*(async_request(f"{config.MEME_API_URL}?q={q}") for q in queries))
 
     entries = []
     for result in results:
@@ -182,38 +186,47 @@ async def fetch_meme_coins() -> List[MemeEntry]:
     return entries
 
 # ---------------------------------
-# Save Results with Upsert
+# Save Results with Upsert and Retry
 # ---------------------------------
 def save_results_to_db(entries: List[YieldEntry]):
+    retries = 3
     for entry in entries:
-        # Check if opportunity exists
-        existing = [o for o in db.get_opportunities(chain=entry.chain) if o["contract_address"] == entry.contract_address]
-        if existing:
-            logging.info(f"Updating opportunity: {entry.project} ({entry.contract_address})")
-            db.save_opportunities([{
-                "id": existing[0]["id"],
-                "project": entry.project,
-                "symbol": entry.symbol,
-                "chain": entry.chain,
-                "apy": entry.apy,
-                "tvl": entry.tvl,
-                "risk": entry.risk,
-                "type": entry.type,
-                "contract_address": entry.contract_address
-            }])
-        else:
-            logging.info(f"Inserting new opportunity: {entry.project} ({entry.contract_address})")
-            db.save_opportunities([{
-                "id": None,
-                "project": entry.project,
-                "symbol": entry.symbol,
-                "chain": entry.chain,
-                "apy": entry.apy,
-                "tvl": entry.tvl,
-                "risk": entry.risk,
-                "type": entry.type,
-                "contract_address": entry.contract_address
-            }])
+        for attempt in range(retries):
+            try:
+                # Check if opportunity exists
+                existing = [o for o in db.get_opportunities(chain=entry.chain) if o["contract_address"] == entry.contract_address]
+                if existing:
+                    logging.info(f"Updating opportunity: {entry.project} ({entry.contract_address})")
+                    db.save_opportunities([{
+                        "id": existing[0]["id"],
+                        "project": entry.project,
+                        "symbol": entry.symbol,
+                        "chain": entry.chain,
+                        "apy": entry.apy,
+                        "tvl": entry.tvl,
+                        "risk": entry.risk,
+                        "type": entry.type,
+                        "contract_address": entry.contract_address
+                    }])
+                else:
+                    logging.info(f"Inserting new opportunity: {entry.project} ({entry.contract_address})")
+                    db.save_opportunities([{
+                        "id": None,
+                        "project": entry.project,
+                        "symbol": entry.symbol,
+                        "chain": entry.chain,
+                        "apy": entry.apy,
+                        "tvl": entry.tvl,
+                        "risk": entry.risk,
+                        "type": entry.type,
+                        "contract_address": entry.contract_address
+                    }])
+                break  # Success, exit retry loop
+            except Exception as e:
+                logging.error(f"Database save failed (attempt {attempt+1}): {e}")
+                if attempt == retries - 1:
+                    logging.error(f"Failed to save after {retries} attempts: {entry.project}")
+                time.sleep(2 ** attempt)  # Backoff
 
 # ---------------------------------
 # Main Scan Loop
@@ -222,21 +235,13 @@ async def full_defi_scan():
     yields, memes = await asyncio.gather(fetch_yields(), fetch_meme_coins())
     return {"yields": [asdict(y) for y in yields], "memes": [asdict(m) for m in memes]}
 
-async def countdown(seconds: int):
-    for remaining in range(seconds, 0, -1):
-        mins, secs = divmod(remaining, 60)
-        print(f"\r⏳ Next scan in {mins:02d}:{secs:02d}", end="", flush=True)
-        await asyncio.sleep(1)
-    print("\r✅ Starting scan now...          ")
-
 async def main_loop():
     while True:
         start = time.time()
         results = await full_defi_scan()
         logging.info(f"Scan completed in {time.time() - start:.2f}s")
-        print(f"\nScan complete in {time.time() - start:.2f}s")
 
-        # Save results
+        # Save results with retry
         if results["yields"]:
             save_results_to_db([YieldEntry(**y) for y in results["yields"]])
         if results["memes"]:
@@ -246,7 +251,8 @@ async def main_loop():
         with open("defi_scan_results.json", "w") as f:
             json.dump(results, f, indent=2)
 
-        await countdown(RESCAN_INTERVAL)
+        logging.info(f"Next scan in {RESCAN_INTERVAL / 3600} hours")
+        await asyncio.sleep(RESCAN_INTERVAL)
 
 # ---------------------------------
 # Entry Point

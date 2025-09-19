@@ -2,5 +2,5 @@
 __pycache__
 views/__pycache__
 defi_dashboard.db
-app.log
+logs
 defi_scan_results.json

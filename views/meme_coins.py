@@ -6,20 +6,15 @@ import logging
 from typing import List
 from defi_scanner import fetch_meme_coins, MemeEntry
 from wallet_utils import (
+    build_erc20_approve_tx_data,
     init_wallets,
     get_connected_wallet,
     create_position,
     add_position_to_session,
-    NETWORK_LOGOS,
-    BALANCE_SYMBOLS,
-    ERC20_TOKENS,
-    ERC20_ABI,
-    CHAIN_IDS,
-    CONTRACT_MAP,
-    explorer_urls,
     connect_to_chain,
     confirm_tx
 )
+from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
 
 logger = logging.getLogger(__name__)
@@ -57,17 +52,35 @@ def render_meme_grid_cards(memes_list: List[MemeEntry], category_name: str):
         st.warning(f"No {category_name} opportunities found.")
         return
 
-    st.markdown("<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>", unsafe_allow_html=True)
+    # Pagination
+    items_per_page = 10
+    total_pages = (len(memes_list) + items_per_page - 1) // items_per_page
+    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="page_meme_coins")
+    start_idx = (current_page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    paginated_memes = memes_list[start_idx:end_idx]
 
-    for i, meme in enumerate(memes_list):
+    st.markdown(
+        """
+        <style>
+            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .text-green-400 { color: #10B981; }
+            .text-red-400 { color: #EF4444; }
+        </style>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    for i, meme in enumerate(paginated_memes):
         pool_id = safe_get(meme, "pool_id", f"unknown_{i}")
         card_key = f"{category_name}_{pool_id}"
         expanded = st.session_state.expanded_cards.get(card_key, False)
 
-        chain = safe_get(meme, "chain", "Unknown").capitalize()
+        chain = safe_get(meme, "chain", "unknown").capitalize()
         symbol = safe_get(meme, "symbol", "Unknown")
-        price = safe_get(meme, "price_usd", "$0.00")
-        change = safe_get(meme, "change_24h_pct", "0%")
+        price = safe_get(meme, "price_usd", "0.00")
+        change = safe_get(meme, "change_24h_pct", "0")
         volume = safe_get(meme, "volume_24h_usd", 0)
         liquidity = safe_get(meme, "liquidity_usd", 0)
         contract = safe_get(meme, "contract_address", "0x0")
@@ -79,63 +92,66 @@ def render_meme_grid_cards(memes_list: List[MemeEntry], category_name: str):
         volume_str = format_number(volume)
         liquidity_str = format_number(liquidity)
 
-        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/12")
+        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
         explorer_url = explorer_urls.get(chain.lower(), "#") + contract
 
-        st.markdown(f"""
-            <div style='padding:1rem;background:#1e1e2f;border-radius:12px;cursor:pointer;'>
+        st.markdown(
+            f"""
+            <div class="card" onclick="document.getElementById('{card_key}').click()">
                 <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
                     <div style='display:flex;align-items:center;'>
-                        <img src="{logo_url}" width="16" height="16" style="margin-right:0.5rem;">
-                        <b style='color:#dbeafe'>{symbol}</b>
+                        <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
+                        <h3 style='margin:0;font-size:1rem;font-weight:600;color:#c7d2fe;'>{symbol}</h3>
                     </div>
-                    <span style='color:{'#10B981' if float(change_str.rstrip('%'))>=0 else '#EF4444'}'>{change_str}</span>
                 </div>
-                <div style='display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;font-size:12px;'>
-                    <div>Price: <b>{price_str}</b></div>
-                    <div>24h Volume: <b>{volume_str}</b></div>
-                    <div>Liquidity: <b>{liquidity_str}</b></div>
-                    <div>Project: <b>{project}</b></div>
-                </div>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Chain: {chain} | Project: {project}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Price: {price_str} | 24h: <span class="{'text-green-400' if float(change_str.rstrip('%')) >= 0 else 'text-red-400'}">{change_str}</span>
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Volume 24h: {volume_str}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Liquidity: {liquidity_str}
+                </p>
+                <a href="{url}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;'>
+                    View Opportunity ↗
+                </a>
+                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;margin-left:1rem;'>
+                    Explore Contract ↗
+                </a>
             </div>
-        """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
 
-        expanded = st.checkbox("Expand", value=expanded, key=f"{card_key}_checkbox", label_visibility="collapsed")
-        st.session_state.expanded_cards[card_key] = expanded
-
-        if expanded:
-            with st.expander("", expanded=True):
-                st.markdown(f"""
-                    <div style='padding:0.5rem;background:#111; border-radius:8px;color:#ccc;font-size:12px;'>
-                        Contract: <a href="{explorer_url}" target="_blank">{contract[:6]}...{contract[-4:]}</a><br>
-                        Details: <a href="{url}" target="_blank">View on Dex</a>
-                    </div>
-                """, unsafe_allow_html=True)
-
+        with st.container():
+            st.checkbox("Expand", value=expanded, key=card_key)
+            if expanded:
                 connected_wallet = get_connected_wallet(st.session_state, chain.lower())
-                if connected_wallet and connected_wallet.verified and connected_wallet.address:
-                    token_options = list(ERC20_TOKENS.get(chain.lower(), {}).keys()) + [BALANCE_SYMBOLS.get(chain.lower(), "Native")]
-                    selected_token = st.selectbox("Select Token", token_options, key=f"token_{i}")
-                    token_address = ERC20_TOKENS.get(chain.lower(), {}).get(selected_token, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
-                    amount = st.number_input("Amount", min_value=0.0, value=1.0, step=0.01, key=f"amount_{i}")
-
-                    if amount > 0 and st.button("💸 Swap with MetaMask", key=f"swap_{i}"):
+                if not connected_wallet:
+                    st.info(f"Connect wallet for {chain} to swap.")
+                else:
+                    available_tokens = list(ERC20_TOKENS.get(chain.lower(), {}).keys())
+                    selected_token = st.selectbox("Select Token to Swap From", available_tokens, key=f"token_{card_key}")
+                    amount = st.number_input("Amount to Swap", min_value=0.0, step=0.1, key=f"amount_{card_key}")
+                    if st.button("Swap", key=f"swap_{card_key}"):
                         try:
-                            router_address = CONTRACT_MAP.get("uniswap", {}).get(chain.lower(), "")
-                            if not router_address:
-                                st.error(f"No router for {chain}")
+                            router_address = CONTRACT_MAP.get("uniswap", {}).get(chain.lower())
+                            token_address = ERC20_TOKENS[chain.lower()].get(selected_token)
+                            chain_id = CHAIN_IDS.get(chain.lower(), 0)
+                            if not router_address or not token_address:
+                                st.error("Invalid router or token address")
                                 continue
-                            approve_tx = {
-                                "from": connected_wallet.address,
-                                "to": token_address,
-                                "data": "0x",  # simplified
-                                "value": 0,
-                                "chainId": CHAIN_IDS.get(chain.lower(), 0)
-                            }
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)  # type: ignore
+
+                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, router_address, amount, connected_wallet.address) # type: ignore
+                            approve_tx['chainId'] = chain_id
+                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
                             time.sleep(1)
-                            response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                            approve_resp = get_post_message()
+                            if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
                                 st.success("Approve confirmed!")
                             else:
                                 st.error("Approve failed")
@@ -146,9 +162,9 @@ def render_meme_grid_cards(memes_list: List[MemeEntry], category_name: str):
                                 "to": router_address,
                                 "data": "0x",
                                 "value": 0,
-                                "chainId": CHAIN_IDS.get(chain.lower(), 0)
+                                "chainId": chain_id
                             }
-                            st.markdown(f"<script>performDeFiAction('swap',{json.dumps(swap_tx)});</script>", unsafe_allow_html=True)  # type: ignore
+                            st.markdown(f"<script>performDeFiAction('swap',{json.dumps(swap_tx)});</script>", unsafe_allow_html=True)
                             time.sleep(1)
                             swap_resp = get_post_message()
                             if swap_resp.get("type") == "streamlit:txSuccess" and isinstance(swap_resp.get("txHash"), str) and swap_resp.get("txHash"):
@@ -169,7 +185,7 @@ def render():
     st.write("Trending meme coins and speculative plays.")
 
     # Initialize wallets
-    if "wallets" not in st.session_state:
+    if 'wallets' not in st.session_state:
         init_wallets(st.session_state)
 
     # Fetch meme coins
@@ -185,15 +201,18 @@ def render():
             render_meme_grid_cards(meme_coins, "meme_coins")
 
     # Risk warning
-    st.markdown("""
-    <div class="card bg-gradient-to-br from-yellow-900/30 to-orange-900/30 p-4 mt-4 rounded-lg shadow-md">
-        <h3 class="text-lg font-semibold text-yellow-400 mb-2">⚠️ Risk Warning</h3>
-        <p class="text-indigo-200 text-sm">
-            Meme coins are highly speculative and volatile. Only invest what you can afford to lose, 
-            and conduct thorough research before participating in these markets.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="card bg-gradient-to-br from-yellow-900/30 to-orange-900/30 p-4 mt-4 rounded-lg shadow-md">
+            <h3 class="text-lg font-semibold text-yellow-400 mb-2">⚠️ Risk Warning</h3>
+            <p class="text-indigo-200 text-sm">
+                Meme coins are highly speculative and volatile. Only invest what you can afford to lose, 
+                and conduct thorough research before participating in these markets.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 if __name__ == "__main__":
     render()

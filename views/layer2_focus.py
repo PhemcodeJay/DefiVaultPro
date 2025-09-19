@@ -4,11 +4,10 @@ import json
 import logging
 from wallet_utils import (
     init_wallets, get_connected_wallet, add_position_to_session,
-    create_position, NETWORK_LOGOS, BALANCE_SYMBOLS, ERC20_TOKENS,
-    CHAIN_IDS, CONTRACT_MAP, PROTOCOL_LOGOS, explorer_urls,
-    build_erc20_approve_tx_data, build_aave_supply_tx_data,
-    build_compound_supply_tx_data, confirm_tx
+    create_position, build_erc20_approve_tx_data, build_aave_supply_tx_data,
+    build_compound_supply_tx_data, confirm_tx,
 )
+from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from utils import get_layer2_opportunities
 from streamlit_javascript import st_javascript
 
@@ -48,9 +47,28 @@ def render_grid_cards(opps_list, category_name: str):
         st.warning(f"No {category_name} opportunities found.")
         return
 
-    st.markdown("<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>", unsafe_allow_html=True)
+    # Pagination
+    items_per_page = 10
+    total_pages = (len(opps_list) + items_per_page - 1) // items_per_page
+    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="page_layer2")
+    start_idx = (current_page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    paginated_opps = opps_list[start_idx:end_idx]
 
-    for i, opp in enumerate(opps_list):
+    st.markdown(
+        """
+        <style>
+            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .text-green-400 { color: #10B981; }
+            .text-yellow-400 { color: #F59E0B; }
+            .text-red-400 { color: #EF4444; }
+        </style>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    for i, opp in enumerate(paginated_opps):
         pool_id = safe_get(opp, "pool_id", f"unknown_{i}")
         card_key = f"{category_name}_{pool_id}"
         expanded = st.session_state.expanded_cards.get(card_key, False)
@@ -59,92 +77,94 @@ def render_grid_cards(opps_list, category_name: str):
         project = safe_get(opp, "project", safe_get(opp, "symbol", "Unknown"))
         symbol = safe_get(opp, "symbol", "Unknown")
         apy_str = safe_get(opp, "apy_str", "0%")
-        tvl_str = safe_get(opp, "tvl_str", "$0")
+        tvl_str = format_number(safe_get(opp, "tvl", 0))
         risk = safe_get(opp, "risk", "Unknown")
         type_ = safe_get(opp, "type", "Unknown")
         contract_address = safe_get(opp, "contract_address", "0x0")
         gas_fee_str = safe_get(opp, "gas_fee_str", "$0.00")
         link = safe_get(opp, "link", "#")
 
-        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/12")
-        protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/12")
+        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
+        protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/32?text=Protocol")
         explorer_url = explorer_urls.get(chain.lower(), "#") + contract_address
 
-        st.markdown(f"""
-            <div style='padding:1rem;background:#1e1e2f;border-radius:12px;cursor:pointer;' onclick="document.getElementById('{card_key}').click()">
+        st.markdown(
+            f"""
+            <div class="card" onclick="document.getElementById('{card_key}').click()">
                 <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
                     <div style='display:flex;align-items:center;'>
-                        <img src="{protocol_logo}" width="16" height="16" style="margin-right:0.5rem;">
-                        <b style='color:#dbeafe'>{symbol}</b>
+                        <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
+                        <h3 style='margin:0;font-size:1rem;font-weight:600;color:#c7d2fe;'>{project}</h3>
                     </div>
-                    <span style='color:#fff'>{risk}</span>
+                    <img src="{protocol_logo}" alt="{project}" style="width:24px;height:24px;border-radius:50%;">
                 </div>
-                <div style='display:flex;align-items:center;margin-bottom:0.5rem;'>
-                    <img src="{logo_url}" width="12" height="12" style="margin-right:0.25rem;">
-                    <span style='color:#aaa;font-size:12px'>{chain}</span>
-                </div>
-                <div style='display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;font-size:12px;'>
-                    <div>APY: <b>{apy_str}</b></div>
-                    <div>TVL: <b>{tvl_str}</b></div>
-                    <div>Type: <b>{type_}</b></div>
-                    <div>Gas: <b>{gas_fee_str}</b></div>
-                </div>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Chain: {chain} | Symbol: {symbol}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Type: {type_}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    APY: <span class="text-green-400">{apy_str}</span> | TVL: {tvl_str}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Risk: <span class="{'text-green-400' if risk=='Low' else 'text-yellow-400' if risk=='Medium' else 'text-red-400'}">{risk}</span>
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Gas Fee: {gas_fee_str}
+                </p>
+                <a href="{link}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;'>
+                    View Opportunity ↗
+                </a>
+                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;margin-left:1rem;'>
+                    Explore Contract ↗
+                </a>
             </div>
-        """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
 
-        expanded = st.checkbox("Expand", value=expanded, key=f"{card_key}_checkbox", label_visibility="collapsed")
-        st.session_state.expanded_cards[card_key] = expanded
-
-        if expanded:
-            with st.expander("", expanded=True):
-                st.markdown(f"""
-                    <div style='padding:0.5rem;background:#111; border-radius:8px;color:#ccc;font-size:12px;'>
-                        Protocol: {project}<br>
-                        Contract: <a href="{explorer_url}" target="_blank">{contract_address[:6]}...{contract_address[-4:]}</a><br>
-                        Details: <a href="{link}" target="_blank">View on Protocol</a>
-                    </div>
-                """, unsafe_allow_html=True)
-
-                # --- MetaMask Investment Workflow ---
+        with st.container():
+            st.checkbox("Expand", value=expanded, key=card_key)
+            if expanded:
                 connected_wallet = get_connected_wallet(st.session_state, chain.lower())
-                if connected_wallet and connected_wallet.verified and connected_wallet.address:
-                    token_options = list(ERC20_TOKENS.get(chain.lower(), {}).keys()) + [BALANCE_SYMBOLS.get(chain.lower(), "Native")]
-                    selected_token = st.selectbox("Select Token", token_options, key=f"token_{i}")
-                    token_address = ERC20_TOKENS.get(chain.lower(), {}).get(selected_token, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
-                    amount = st.number_input("Amount to Invest", min_value=0.0, value=1.0, step=0.01, key=f"amount_{i}")
-                    pool_address = CONTRACT_MAP.get(project.lower(), {}).get(chain.lower(), "")
-                    chain_id = CHAIN_IDS.get(chain.lower(), 0)
-
-                    if amount > 0 and st.button("💸 Invest with MetaMask", key=f"invest_{i}"):
+                if not connected_wallet:
+                    st.info(f"Connect wallet for {chain} to invest.")
+                else:
+                    available_tokens = list(ERC20_TOKENS.get(chain.lower(), {}).keys())
+                    selected_token = st.selectbox("Select Token to Invest", available_tokens, key=f"token_{card_key}")
+                    amount = st.number_input("Amount to Invest", min_value=0.0, step=0.1, key=f"amount_{card_key}")
+                    if st.button("Invest", key=f"invest_{card_key}"):
                         try:
                             protocol = project.lower()
-                            # Approve tx
-                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
-                            approve_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)  # type: ignore
-                            time.sleep(1)
-                            response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                                if confirm_tx(chain.lower(), response['txHash']):
-                                    st.success("Approve transaction confirmed!")
-                                else:
-                                    st.error("Approve transaction failed")
-                                    continue
-                            else:
-                                st.error("Approve transaction failed")
+                            token_address = ERC20_TOKENS[chain.lower()].get(selected_token)
+                            pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower())
+                            chain_id = CHAIN_IDS.get(chain.lower(), 0)
+                            if not pool_address or not token_address:
+                                st.error("Invalid pool or token address")
                                 continue
 
-                            # Supply tx
+                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address) # type: ignore
+                            approve_tx['chainId'] = chain_id
+                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                            time.sleep(1)
+                            approve_resp = get_post_message()
+                            if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
+                                st.success("Approve confirmed!")
+                            else:
+                                st.error("Approve failed")
+                                continue
+
                             if 'aave' in protocol:
-                                supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
+                                supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address) # type: ignore
                             elif 'compound' in protocol:
-                                supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
+                                supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address) # type: ignore
                             else:
                                 st.error(f"Unsupported protocol: {protocol}")
                                 continue
 
                             supply_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)  # type: ignore
+                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
                             time.sleep(1)
                             response = get_post_message()
                             if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):

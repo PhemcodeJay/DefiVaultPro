@@ -1,27 +1,24 @@
+import json
+import time
 import streamlit as st
 import asyncio
 from typing import Dict, Any
 import db
 import requests
+from views.layer2_focus import get_post_message
 from wallet_utils import (
     get_connected_wallet,
     close_position,
-    NETWORK_LOGOS,
-    PROTOCOL_LOGOS,
-    CONTRACT_MAP,
-    explorer_urls,
     get_token_price,
     connect_to_chain,
     build_aave_withdraw_tx_data,
     build_compound_withdraw_tx_data,
     confirm_tx,
 )
+from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
 
-
-# ---------------------------
-# Async helpers
-# ---------------------------
+# --- Async Helpers ---
 async def async_get_current_token_price(token_symbol: str, chain: str) -> float:
     """Fetch token price safely in a thread."""
     try:
@@ -29,7 +26,6 @@ async def async_get_current_token_price(token_symbol: str, chain: str) -> float:
     except Exception as e:
         st.warning(f"Failed to fetch price for {token_symbol} on {chain}: {e}")
         return 0.0
-
 
 async def async_get_chain_gas_fee(chain: str) -> float:
     """Estimate chain gas fee in USD."""
@@ -62,7 +58,6 @@ async def async_get_chain_gas_fee(chain: str) -> float:
         st.warning(f"Failed to fetch gas fee for {chain}: {e}")
         return 0.0
 
-
 async def fetch_positions_data(positions):
     """Fetch all prices and gas fees concurrently."""
     price_tasks = [
@@ -74,174 +69,139 @@ async def fetch_positions_data(positions):
     gas_fees = await asyncio.gather(*gas_tasks, return_exceptions=True)
     return {
         pos["id"]: {
-            "price": price if isinstance(price, float) else 0.0,
-            "gas_fee": gas_fee if isinstance(gas_fee, float) else 0.0,
+            "price": prices if isinstance(prices, float) else 0.0,
+            "gas_fee": gas_fees if isinstance(gas_fees, float) else 0.0,
         }
-        for pos, price, gas_fee in zip(positions, prices, gas_fees)
+        for pos in positions
     }
 
-
-# ---------------------------
-# Utility to get postMessage safely
-# ---------------------------
-def get_post_message() -> Dict[str, Any]:
-    try:
-        res = st_javascript("return window.lastMessage || {}")
-        return res if isinstance(res, dict) else {}
-    except Exception:
-        return {}
-
-
-# ---------------------------
-# Render Position Cards
-# ---------------------------
-def render_position_cards(positions, data_map, status: str):
-    if "expanded_cards" not in st.session_state:
-        st.session_state.expanded_cards = {}
-
+# --- Render Position Cards ---
+def render_position_cards(positions, data_map, status_type: str):
     if not positions:
-        st.markdown(
-            f"<p class='text-indigo-200 text-sm'>No {status} positions</p>",
-            unsafe_allow_html=True,
-        )
+        st.info(f"No {status_type} positions found.")
         return
 
+    # Pagination
+    items_per_page = 5
+    total_pages = (len(positions) + items_per_page - 1) // items_per_page
+    current_page = st.number_input(f"{status_type.capitalize()} Page", min_value=1, max_value=total_pages, value=1, key=f"page_{status_type}")
+    start_idx = (current_page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    paginated_positions = positions[start_idx:end_idx]
+
     st.markdown(
-        "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;'>",
+        """
+        <style>
+            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .text-green-400 { color: #10B981; }
+            .text-red-400 { color: #EF4444; }
+        </style>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;'>
+        """,
         unsafe_allow_html=True,
     )
 
-    for pos in positions:
-        card_key = f"position_{status}_{pos['id']}"
-        current_price = data_map.get(pos["id"], {}).get("price", 0.0)
-        current_value = pos["amount_invested"] * current_price
-        pnl = current_value - pos["amount_invested"]
-        pnl_pct = (pnl / pos["amount_invested"] * 100) if pos["amount_invested"] > 0 else 0
-        gas_fee = data_map.get(pos["id"], {}).get("gas_fee", 0.0)
-        logo_url = NETWORK_LOGOS.get(pos["chain"].lower(), "https://via.placeholder.com/16")
-        protocol_logo = PROTOCOL_LOGOS.get(
-            pos["protocol"].lower() if pos.get("protocol") else "",
-            "https://via.placeholder.com/16",
-        )
+    for pos in paginated_positions:
+        chain = pos.get("chain", "unknown").capitalize()
+        protocol = pos.get("protocol", "unknown").lower()
+        opportunity = pos.get("opportunity_name", "Unknown")
+        symbol = pos.get("token_symbol", "Unknown")
+        invested = pos.get("amount_invested", 0.0)
+        tx_hash = pos.get("tx_hash", "No Tx")
+        entry_date = pos.get("entry_date", "Unknown")
+        exit_date = pos.get("exit_date", "Active") if status_type == "closed" else "Active"
+        apy = pos.get("apy", 0.0)
+
+        data = data_map.get(pos["id"], {})
+        price = data.get("price", 0.0)
+        gas_fee = data.get("gas_fee", 0.0)
+        current_value = invested * price
+        pnl = current_value - invested
+        pnl_pct = (pnl / invested * 100) if invested > 0 else 0
+
+        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
+        protocol_logo = PROTOCOL_LOGOS.get(protocol, "https://via.placeholder.com/32?text=Protocol")
+        explorer_url = explorer_urls.get(chain.lower(), "#") + tx_hash if tx_hash != "No Tx" else "#"
 
         st.markdown(
             f"""
-            <div class="compact-card bg-gradient-to-br from-gray-900/30 to-gray-700/30 p-4 rounded-lg">
-                <div class="flex justify-between items-start mb-2">
-                    <div>
-                        <h4 class="font-semibold text-indigo-200 text-xs mb-1">{pos['token_symbol']}</h4>
-                        <span class="text-[0.65rem] text-gray-400">{pos['opportunity_name']}</span>
+            <div class="card">
+                <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
+                    <div style='display:flex;align-items:center;'>
+                        <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
+                        <h3 style='margin:0;font-size:1rem;font-weight:600;color:#c7d2fe;'>{opportunity}</h3>
                     </div>
-                    <img src="{protocol_logo}" alt="{pos['opportunity_name']}" class="w-4 h-4 rounded-full">
+                    <img src="{protocol_logo}" alt="{protocol.capitalize()}" style="width:24px;height:24px;border-radius:50%;">
                 </div>
-                <div class="grid grid-cols-2 gap-1 mb-2 text-[0.65rem]">
-                    <div class="flex flex-col"><span class="text-gray-400">Amount</span><span class="font-bold">{pos['amount_invested']:.2f}</span></div>
-                    <div class="flex flex-col"><span class="text-gray-400">Value</span><span class="font-bold">${current_value:.2f}</span></div>
-                    <div class="flex flex-col"><span class="text-gray-400">PnL</span><span class="font-bold {'text-green-400' if pnl>=0 else 'text-red-400'}">${pnl:.2f}</span></div>
-                    <div class="flex flex-col"><span class="text-gray-400">PnL %</span><span class="font-bold {'text-green-400' if pnl>=0 else 'text-red-400'}">{pnl_pct:.2f}%</span></div>
-                </div>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Chain: {chain} | Protocol: {protocol.capitalize()}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Invested: {invested:.2f} {symbol} (${invested * price:.2f})
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Current Value: ${current_value:.2f}
+                </p>
+                <p class="{'text-green-400' if pnl >= 0 else 'text-red-400'}" style='font-size:0.9rem;margin-bottom:0.25rem;'>
+                    PnL: ${pnl:.2f} ({pnl_pct:.2f}%)
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    APY: {apy:.2f}% | Gas to Close: ${gas_fee:.2f}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Entry: {entry_date} | Exit: {exit_date}
+                </p>
+                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;'>
+                    View Tx on Explorer ↗
+                </a>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        # Expander for details & close
-        with st.expander("Details", expanded=st.session_state.expanded_cards.get(card_key, False)):
-            st.markdown(
-                f"""
-                <p><strong>Chain:</strong> {pos['chain'].capitalize()}</p>
-                <p><strong>Protocol:</strong> {pos['protocol'] or 'N/A'}</p>
-                <p><strong>Entry Date:</strong> {pos['entry_date'].strftime('%Y-%m-%d %H:%M:%S') if pos['entry_date'] else 'N/A'}</p>
-                <p><strong>Tx Hash:</strong> <a href="{explorer_urls.get(pos['chain'].lower(), '')}{pos['tx_hash']}" target="_blank">{pos['tx_hash'][:6]}...{pos['tx_hash'][-4:]}</a></p>
-                <p><strong>Estimated Gas to Close:</strong> ${gas_fee:.2f}</p>
-                """,
-                unsafe_allow_html=True,
-            )
+        if status_type == "active":
+            with st.container():
+                if st.button("Close Position", key=f"close_{pos['id']}"):
+                    connected_wallet = get_connected_wallet(st.session_state, chain.lower())
+                    if not connected_wallet:
+                        st.error(f"No connected wallet for {chain}.")
+                    else:
+                        try:
+                            protocol = protocol.lower()
+                            token_address = pos.get("token_address")
+                            pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower())
+                            if not pool_address or not token_address:
+                                st.error("Invalid pool or token address")
+                            else:
+                                if 'aave' in protocol:
+                                    withdraw_tx = build_aave_withdraw_tx_data(chain.lower(), token_address, invested, connected_wallet.address) # type: ignore
+                                elif 'compound' in protocol:
+                                    withdraw_tx = build_compound_withdraw_tx_data(chain.lower(), token_address, invested, connected_wallet.address) # type: ignore
+                                else:
+                                    st.error(f"Unsupported protocol: {protocol}")
+                                    continue
 
-            if status == "active" and st.button("Close Position", key=f"close_{pos['id']}"):
-                asyncio.run(close_position_async(pos))
+                                withdraw_tx['chainId'] = CHAIN_IDS.get(chain.lower(), 0)
+                                st.markdown(f"<script>performDeFiAction('withdraw',{json.dumps(withdraw_tx)});</script>", unsafe_allow_html=True)
+                                time.sleep(1)
+                                response = get_post_message()
+                                if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                    if confirm_tx(chain.lower(), response['txHash']):
+                                        if close_position(st.session_state, pos["id"], response['txHash']):
+                                            st.success("Position closed successfully.")
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to close position.")
+                                    else:
+                                        st.error("Transaction confirmation failed.")
+                                else:
+                                    st.error("Withdraw transaction failed.")
+                        except Exception as e:
+                            st.error(f"Failed to close position: {str(e)}")
 
+    st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------------
-# Async Close Position
-# ---------------------------
-async def close_position_async(pos):
-    wallet = get_connected_wallet(st.session_state, pos["chain"])
-    if not wallet or not wallet.address:
-        st.error("No connected wallet for this chain.")
-        return
-
-    try:
-        protocol = pos["protocol"].lower() if pos.get("protocol") else ""
-        contract_address = CONTRACT_MAP.get(protocol, {}).get(pos["chain"].lower())
-        if not contract_address:
-            st.error(f"No contract address for {protocol} on {pos['chain']}")
-            return
-
-        if protocol == "aave":
-            tx_data = build_aave_withdraw_tx_data(pos["chain"], contract_address, pos["token_symbol"], pos["amount_invested"], wallet.address)
-        elif protocol == "compound":
-            tx_data = build_compound_withdraw_tx_data(pos["chain"], contract_address, pos["token_symbol"], pos["amount_invested"], wallet.address)
-        else:
-            st.error(f"Unsupported protocol: {protocol}")
-            return
-
-        from_addr = str(tx_data.get("from", ""))
-        to_addr = str(tx_data.get("to", ""))
-        gas = int(tx_data.get("gas", 0) or 0)
-        gas_price = int(tx_data.get("gasPrice", 0) or 0)
-        data = str(tx_data.get("data", ""))
-        nonce = int(tx_data.get("nonce", 0) or 0)
-
-        st.write("Please confirm the transaction in your wallet.")
-        st.markdown(
-            f"""
-            <script>
-            async function sendTransaction() {{
-                try {{
-                    const txResponse = await window.ethereum.request({{
-                        method: 'eth_sendTransaction',
-                        params: [{{
-                            from: '{from_addr}',
-                            to: '{to_addr}',
-                            gas: '0x{gas:x}',
-                            gasPrice: '0x{gas_price:x}',
-                            data: '{data}',
-                            nonce: '0x{nonce:x}'
-                        }}]
-                    }});
-                    window.lastMessage = {{ type: 'streamlit:txSent', txHash: txResponse }};
-                    window.parent.postMessage(window.lastMessage, window.location.origin);
-                }} catch (err) {{
-                    window.lastMessage = {{ type: 'streamlit:txError', error: err.message }};
-                    window.parent.postMessage(window.lastMessage, window.location.origin);
-                }}
-            }}
-            sendTransaction();
-            </script>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Wait for JS message
-        msg = get_post_message()
-        if msg.get("type") == "streamlit:txSent" and msg.get("txHash"):
-            if confirm_tx(pos["chain"], msg["txHash"]):
-                close_position(st.session_state, pos["id"], msg["txHash"])
-                st.success("Position closed successfully!")
-                st.rerun()
-            else:
-                st.error("Transaction failed.")
-        elif msg.get("type") == "streamlit:txError":
-            st.error(f"Transaction error: {msg['error']}")
-
-    except Exception as e:
-        st.error(f"Failed to close position: {e}")
-
-
-# ---------------------------
-# Main Render Function
-# ---------------------------
+# --- Main Render Function ---
 def render():
     st.title("📊 My Positions")
     st.write("Manage your DeFi positions.")
@@ -269,21 +229,25 @@ def render():
 
     st.markdown(
         f"""
+        <style>
+            .compact-card {{ background: linear-gradient(135deg, rgba(49,46,129,0.3), rgba(30,64,175,0.3));
+                            border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+        </style>
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <div class="compact-card bg-gradient-to-br from-blue-900/30 to-blue-700/30 p-3 rounded-lg">
+            <div class="compact-card">
                 <h4 class="text-xs text-blue-300 mb-1">Total Invested</h4>
                 <p class="text-lg font-bold text-white">${total_invested:.2f}</p>
             </div>
-            <div class="compact-card bg-gradient-to-br from-green-900/30 to-green-700/30 p-3 rounded-lg">
+            <div class="compact-card">
                 <h4 class="text-xs text-green-300 mb-1">Current Value</h4>
                 <p class="text-lg font-bold text-white">${total_current_value:.2f}</p>
             </div>
-            <div class="compact-card bg-gradient-to-br from-purple-900/30 to-purple-700/30 p-3 rounded-lg">
+            <div class="compact-card">
                 <h4 class="text-xs text-purple-300 mb-1">Total PnL</h4>
                 <p class="text-lg font-bold {'text-green-400' if total_pnl>=0 else 'text-red-400'}">${total_pnl:.2f}</p>
                 <p class="text-xs {'text-green-400' if total_pnl>=0 else 'text-red-400'}">{total_pnl_pct:.2f}%</p>
             </div>
-            <div class="compact-card bg-gradient-to-br from-gray-900/30 to-gray-700/30 p-3 rounded-lg">
+            <div class="compact-card">
                 <h4 class="text-xs text-gray-300 mb-1">Active Positions</h4>
                 <p class="text-lg font-bold text-white">{len(active_positions)}</p>
             </div>
@@ -297,3 +261,6 @@ def render():
         render_position_cards(active_positions, data_map, "active")
     with tab2:
         render_position_cards(closed_positions, data_map, "closed")
+
+if __name__ == "__main__":
+    render()

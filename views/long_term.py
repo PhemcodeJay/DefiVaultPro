@@ -1,27 +1,20 @@
-import time
 import streamlit as st
+import time
 import json
-import asyncio
 import logging
 from typing import Dict, Any, List
 from utils import get_long_term_opportunities
 from wallet_utils import (
+    init_wallets,
     get_connected_wallet,
     create_position,
     add_position_to_session,
-    NETWORK_LOGOS,
-    BALANCE_SYMBOLS,
-    CHAIN_IDS,
-    ERC20_TOKENS,
-    explorer_urls,
     build_erc20_approve_tx_data,
     build_aave_supply_tx_data,
     build_compound_supply_tx_data,
     confirm_tx,
-    PROTOCOL_LOGOS,
-    CONTRACT_MAP,
-    init_wallets
 )
+from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
 
 # --- Logging ---
@@ -45,52 +38,43 @@ def format_number(value: float) -> str:
         elif value >= 1_000:
             return f"${value / 1_000:.2f}K"
         return f"${value:,.2f}"
-    except (ValueError, TypeError):
+    except:
         return str(value)
 
 def get_post_message() -> Dict[str, Any]:
     return st_javascript("return window.lastMessage || {}")
 
 # --- Render Grid Cards ---
-def render_grid_cards(
-    opps_list: List[Dict[str, Any]],
-    category_name: str,
-    bg_color: str = "bg-gradient-to-br from-green-900/30 to-teal-900/30",
-):
+def render_grid_cards(opps_list: List[Dict[str, Any]], category_name: str):
     if "expanded_cards" not in st.session_state:
         st.session_state.expanded_cards = {}
 
-    logger.info(f"Rendering {len(opps_list)} {category_name} opportunities")
     if not opps_list:
-        st.markdown(
-            f"""
-            <div class="card {bg_color} p-4 rounded-lg shadow-md">
-                <p class="text-indigo-200 text-sm flex items-center">
-                    <i class="fas fa-info-circle mr-2"></i>No {category_name.replace('_', ' ').title()} opportunities available.
-                </p>
-            </div>
-        """,
-            unsafe_allow_html=True,
-        )
+        st.warning(f"No {category_name.replace('_', ' ').title()} opportunities found.")
         return
+
+    # Pagination
+    items_per_page = 10
+    total_pages = (len(opps_list) + items_per_page - 1) // items_per_page
+    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="page_long_term")
+    start_idx = (current_page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    paginated_opps = opps_list[start_idx:end_idx]
 
     st.markdown(
         """
         <style>
-            .card { aspect-ratio: 1/1; transition: all 0.3s; border-radius: 12px; padding: 1rem;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            .card:hover { transform: translateY(-4px); box-shadow: 0 8px 16px rgba(0,0,0,0.2); }
-            .risk-low { color: #10B981; }
-            .risk-medium { color: #F59E0B; }
-            .risk-high { color: #EF4444; }
+            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .text-green-400 { color: #10B981; }
+            .text-yellow-400 { color: #F59E0B; }
+            .text-red-400 { color: #EF4444; }
         </style>
-        <div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1rem; padding: 1rem;'>
-    """,
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>
+        """,
         unsafe_allow_html=True,
     )
 
-    for i, opp in enumerate(opps_list):
+    for i, opp in enumerate(paginated_opps):
         pool_id = safe_get(opp, "id", safe_get(opp, "pool_id", f"unknown_{i}"))
         card_key = f"{category_name}_{pool_id}"
         expanded = st.session_state.expanded_cards.get(card_key, False)
@@ -98,158 +82,97 @@ def render_grid_cards(
         chain = safe_get(opp, "chain", "unknown").capitalize()
         project = safe_get(opp, "project", safe_get(opp, "symbol", "Unknown"))
         symbol = safe_get(opp, "symbol", "Unknown")
-        apy_str = safe_get(opp, "apy", safe_get(opp, "apy_str", "0%"))
-        tvl_str = safe_get(opp, "tvl", safe_get(opp, "tvl_str", "$0"))
+        apy_str = safe_get(opp, "apy_str", "0%")
+        tvl_str = format_number(safe_get(opp, "tvl", 0))
         risk = safe_get(opp, "risk", "Unknown")
         type_ = safe_get(opp, "type", "Unknown")
         contract_address = safe_get(opp, "contract_address", "0x0")
-        gas_fee_str = safe_get(opp, "gas_fee_str", "$0.00")
-        last_updated = safe_get(opp, "last_updated", "Unknown")
         link = safe_get(opp, "link", "#")
 
-        try:
-            apy_float = float(str(apy_str).rstrip("%"))
-            apy_str = f"{apy_float:.2f}%"
-        except:
-            pass
-
-        try:
-            tvl_float = float(str(tvl_str).lstrip("$").replace(",", ""))
-            tvl_str = format_number(tvl_float)
-        except:
-            pass
-
-        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/12")
-        protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/12")
+        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
+        protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/32?text=Protocol")
         explorer_url = explorer_urls.get(chain.lower(), "#") + contract_address
 
         st.markdown(
             f"""
-            <div class="card {bg_color} hover:shadow-lg" 
-                 onclick="document.getElementById('{card_key}').click()"
-                 style="cursor:pointer;" role="button" aria-label="Expand {project} card">
-                <div class="flex justify-between items-center mb-3">
-                    <div class="flex items-center">
-                        <img src="{protocol_logo}" alt="{project}" class="w-3 h-3 rounded-full mr-2">
-                        <h4 class="font-bold text-indigo-100 text-lg">{symbol}</h4>
+            <div class="card" onclick="document.getElementById('{card_key}').click()">
+                <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
+                    <div style='display:flex;align-items:center;'>
+                        <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
+                        <h3 style='margin:0;font-size:1rem;font-weight:600;color:#c7d2fe;'>{project}</h3>
                     </div>
-                    <span class="text-sm font-semibold risk-{risk.lower()}">{risk}</span>
+                    <img src="{protocol_logo}" alt="{project}" style="width:24px;height:24px;border-radius:50%;">
                 </div>
-                <div class="flex items-center mb-2">
-                    <img src="{logo_url}" alt="{chain}" class="w-3 h-3 rounded-full mr-2">
-                    <span class="text-xs text-gray-400">{chain}</span>
-                </div>
-                <div class="grid grid-cols-2 gap-2 text-sm">
-                    <div class="flex flex-col"><span class="text-xs text-gray-400">APY</span>
-                        <span class="font-bold text-indigo-100">{apy_str}</span></div>
-                    <div class="flex flex-col"><span class="text-xs text-gray-400">TVL</span>
-                        <span class="font-bold text-indigo-100">{tvl_str}</span></div>
-                    <div class="flex flex-col"><span class="text-xs text-gray-400">Type</span>
-                        <span class="font-bold text-indigo-100">{type_}</span></div>
-                    <div class="flex flex-col"><span class="text-xs text-gray-400">Gas Fee</span>
-                        <span class="font-bold text-indigo-100">{gas_fee_str}</span></div>
-                </div>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Chain: {chain} | Symbol: {symbol}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Type: {type_}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    APY: <span class="text-green-400">{apy_str}</span> | TVL: {tvl_str}
+                </p>
+                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
+                    Risk: <span class="{'text-green-400' if risk=='Low' else 'text-yellow-400' if risk=='Medium' else 'text-red-400'}">{risk}</span>
+                </p>
+                <a href="{link}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;'>
+                    View Opportunity ↗
+                </a>
+                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;margin-left:1rem;'>
+                    Explore Contract ↗
+                </a>
             </div>
-        """,
+            """,
             unsafe_allow_html=True,
         )
 
-        expanded = st.checkbox("Expand", value=expanded, key=f"{card_key}_checkbox", label_visibility="collapsed")
-        st.session_state.expanded_cards[card_key] = expanded
-
-        if expanded:
-            with st.expander("", expanded=True):
-                st.markdown(
-                    f"""
-                    <div class="p-3 bg-gray-800/50 rounded-lg">
-                        <p class="text-xs text-gray-400 mb-1">Protocol: {project}</p>
-                        <p class="text-xs text-gray-400 mb-1">Contract: 
-                            <a href="{explorer_url}" target="_blank" class="text-blue-400 hover:underline">
-                                {contract_address[:6]}...{contract_address[-4:]}
-                            </a>
-                        </p>
-                        <p class="text-xs text-gray-400 mb-1">Details: 
-                            <a href="{link}" target="_blank" class="text-blue-400 hover:underline">View on Protocol</a>
-                        </p>
-                        <p class="text-xs text-gray-400 mb-1">Last Updated: {last_updated}</p>
-                    </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-
-                # --- MetaMask Investment Workflow ---
+        with st.container():
+            st.checkbox("Expand", value=expanded, key=card_key)
+            if expanded:
                 connected_wallet = get_connected_wallet(st.session_state, chain.lower())
-                if connected_wallet and connected_wallet.verified and connected_wallet.address:
-                    token_options = list(ERC20_TOKENS.get(chain.lower(), {}).keys()) + [
-                        BALANCE_SYMBOLS.get(chain.lower(), "Native")
-                    ]
-                    selected_token = st.selectbox("Select Token", token_options, key=f"token_{i}")
-                    token_address = ERC20_TOKENS.get(chain.lower(), {}).get(
-                        selected_token, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-                    )
-                    amount = st.number_input(
-                        "Amount to Invest", min_value=0.0, value=1.0, step=0.01, key=f"amount_{i}"
-                    )
-                    pool_address = CONTRACT_MAP.get(project.lower(), {}).get(chain.lower(), "")
-                    chain_id = CHAIN_IDS.get(chain.lower(), 0)
-
-                    if amount > 0 and st.button("💸 Invest with MetaMask", key=f"invest_{i}"):
+                if not connected_wallet:
+                    st.info(f"Connect wallet for {chain} to invest.")
+                else:
+                    available_tokens = list(ERC20_TOKENS.get(chain.lower(), {}).keys())
+                    selected_token = st.selectbox("Select Token to Invest", available_tokens, key=f"token_{card_key}")
+                    amount = st.number_input("Amount to Invest", min_value=0.0, step=0.1, key=f"amount_{card_key}")
+                    if st.button("Invest", key=f"invest_{card_key}"):
                         try:
                             protocol = project.lower()
-                            # Approve tx
-                            approve_tx = build_erc20_approve_tx_data(
-                                chain.lower(), token_address, pool_address, amount, connected_wallet.address
-                            )
-                            approve_tx["chainId"] = chain_id
-                            st.markdown(
-                                f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>",
-                                unsafe_allow_html=True,
-                            )
-                            time.sleep(1)
-                            response = get_post_message()
-                            if (
-                                response.get("type") == "streamlit:txSuccess"
-                                and isinstance(response.get("txHash"), str)
-                                and response.get("txHash")
-                            ):
-                                if confirm_tx(chain.lower(), response["txHash"]):
-                                    st.success("Approve transaction confirmed!")
-                                else:
-                                    st.error("Approve transaction failed")
-                                    continue
-                            else:
-                                st.error("Approve transaction failed")
+                            token_address = ERC20_TOKENS[chain.lower()].get(selected_token)
+                            pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower())
+                            chain_id = CHAIN_IDS.get(chain.lower(), 0)
+                            if not pool_address or not token_address:
+                                st.error("Invalid pool or token address")
                                 continue
 
-                            # Supply tx
-                            if "aave" in protocol:
-                                supply_tx = build_aave_supply_tx_data(
-                                    chain.lower(), pool_address, token_address, amount, connected_wallet.address
-                                )
-                            elif "compound" in protocol:
-                                supply_tx = build_compound_supply_tx_data(
-                                    chain.lower(), pool_address, token_address, amount, connected_wallet.address
-                                )
+                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address) # type: ignore
+                            approve_tx['chainId'] = chain_id
+                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                            time.sleep(1)
+                            approve_resp = get_post_message()
+                            if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
+                                st.success("Approve confirmed!")
+                            else:
+                                st.error("Approve failed")
+                                continue
+
+                             # Supply
+                            if 'aave' in protocol:
+                                supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address) # type: ignore
+                            elif 'compound' in protocol:
+                                supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address) # type: ignore
                             else:
                                 st.error(f"Unsupported protocol: {protocol}")
                                 continue
 
-                            supply_tx["chainId"] = chain_id
-                            st.markdown(
-                                f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>",
-                                unsafe_allow_html=True,
-                            )
+                            supply_tx['chainId'] = chain_id
+                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
                             time.sleep(1)
                             response = get_post_message()
-                            if (
-                                response.get("type") == "streamlit:txSuccess"
-                                and isinstance(response.get("txHash"), str)
-                                and response.get("txHash")
-                            ):
-                                if confirm_tx(chain.lower(), response["txHash"]):
-                                    position = create_position(
-                                        chain.lower(), project, selected_token, amount, response["txHash"]
-                                    )
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
                                     add_position_to_session(st.session_state, position)
                                     st.success(f"Invested {amount} {selected_token} in {project}!")
                                 else:
@@ -276,49 +199,25 @@ def render():
     def cached_get_long_term_opportunities():
         try:
             results = get_long_term_opportunities()
-            # If it's a coroutine, await it
-            if asyncio.iscoroutine(results):
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    results = asyncio.ensure_future(results)
-                    results = loop.run_until_complete(results)
+            serializable = []
+            for r in results:
+                if hasattr(r, "__dict__"):
+                    serializable.append(vars(r))
+                elif isinstance(r, dict):
+                    serializable.append(r)
                 else:
-                    results = asyncio.run(results)
+                    try:
+                        serializable.append(dict)
+                    except Exception:
+                        serializable.append({"value": str(r)})
+            return serializable
         except Exception as e:
             logger.error(f"Error fetching long term opportunities: {e}")
             return []
 
-        # Ensure results are serializable
-        serializable = []
-        for r in results:
-            if hasattr(r, "__dict__"):
-                serializable.append(vars(r))
-            elif isinstance(r, dict):
-                serializable.append(r)
-            else:
-                try:
-                    serializable.append(dict)
-                except Exception:
-                    serializable.append(r)
-        return serializable
-
     st.subheader("🏛 Stable Opportunities")
     with st.spinner("🔍 Scanning for long-term opportunities..."):
-        results = cached_get_long_term_opportunities()
-
-        # Ensure serializable
-        long_term_opps: List[Dict[str, Any]] = []
-        for r in results:
-            if hasattr(r, "__dict__"):
-                long_term_opps.append(vars(r))
-            elif isinstance(r, dict):
-                long_term_opps.append(r)
-            else:
-                try:
-                    long_term_opps.append(dict(r))
-                except Exception:
-                    long_term_opps.append({"value": str(r)})
-
+        long_term_opps = cached_get_long_term_opportunities()
         logger.info(f"Fetched {len(long_term_opps)} long-term opportunities for rendering")
         if not long_term_opps:
             st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
@@ -328,14 +227,14 @@ def render():
     # Additional Info
     st.markdown(
         """
-    <div class="card bg-gradient-to-br from-green-900/30 to-teal-900/30 p-4 mt-4 rounded-lg shadow-md">
-        <h3 class="text-lg font-semibold text-green-400 mb-2">💡 Selection Criteria</h3>
-        <p class="text-indigo-200 text-sm">
-            Long-term opportunities are selected for their stability, low risk, and high liquidity (TVL). 
-            Ideal for consistent returns over extended periods.
-        </p>
-    </div>
-    """,
+        <div class="card bg-gradient-to-br from-green-900/30 to-teal-900/30 p-4 mt-4 rounded-lg shadow-md">
+            <h3 class="text-lg font-semibold text-green-400 mb-2">💡 Selection Criteria</h3>
+            <p class="text-indigo-200 text-sm">
+                Long-term opportunities are selected for their stability, low risk, and high liquidity (TVL). 
+                Ideal for consistent returns over extended periods.
+            </p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 

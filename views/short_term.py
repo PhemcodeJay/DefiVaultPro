@@ -4,11 +4,11 @@ import json
 import logging
 from wallet_utils import (
     init_wallets, get_connected_wallet, add_position_to_session,
-    create_position, NETWORK_LOGOS, BALANCE_SYMBOLS, ERC20_TOKENS,
-    CHAIN_IDS, CONTRACT_MAP, PROTOCOL_LOGOS, explorer_urls,
+    create_position,
     build_erc20_approve_tx_data, build_aave_supply_tx_data,
     build_compound_supply_tx_data, confirm_tx
 )
+from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from utils import get_short_term_opportunities
 from streamlit_javascript import st_javascript
 
