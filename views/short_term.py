@@ -8,14 +8,15 @@ from wallet_utils import (
     init_wallets, get_connected_wallet, add_position_to_session,
     create_position, NETWORK_LOGOS, BALANCE_SYMBOLS, ERC20_TOKENS,
     ERC20_ABI, CHAIN_IDS, CONTRACT_MAP, PROTOCOL_LOGOS, explorer_urls,
-    connect_to_chain, build_approve_tx_data, build_aave_supply_tx_data,
+    build_erc20_approve_tx_data, build_aave_supply_tx_data,
     build_compound_supply_tx_data, confirm_tx
 )
+from utils import connect_to_chain
 from streamlit_javascript import st_javascript
 
 logger = logging.getLogger(__name__)
 
-# ---------------------- UTILITY FUNCTIONS ---------------------- #
+# --- Utility Functions ---
 def safe_get(obj, key, default):
     if hasattr(obj, key):
         return getattr(obj, key, default)
@@ -39,7 +40,7 @@ def format_number(value: float) -> str:
 def get_post_message():
     return st_javascript("return window.lastMessage || {}")
 
-# ---------------------- GRID CARDS ---------------------- #
+# --- Render Grid Cards ---
 def render_grid_cards(opps_list, category_name: str):
     if "expanded_cards" not in st.session_state:
         st.session_state.expanded_cards = {}
@@ -90,7 +91,6 @@ def render_grid_cards(opps_list, category_name: str):
             </div>
         """, unsafe_allow_html=True)
 
-        # Expand details
         expanded = st.checkbox("Expand", value=expanded, key=f"{card_key}_checkbox", label_visibility="collapsed")
         st.session_state.expanded_cards[card_key] = expanded
 
@@ -118,13 +118,17 @@ def render_grid_cards(opps_list, category_name: str):
                         try:
                             protocol = project.lower()
                             # Approve
-                            approve_tx = build_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
+                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
                             approve_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
                             response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and confirm_tx(chain.lower(), response['txHash']):
-                                st.success("Approve transaction confirmed!")
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    st.success("Approve transaction confirmed!")
+                                else:
+                                    st.error("Approve transaction failed")
+                                    continue
                             else:
                                 st.error("Approve transaction failed")
                                 continue
@@ -139,13 +143,16 @@ def render_grid_cards(opps_list, category_name: str):
                                 continue
 
                             supply_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
                             response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and confirm_tx(chain.lower(), response['txHash']):
-                                position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
-                                add_position_to_session(st.session_state, position)
-                                st.success(f"Invested {amount} {selected_token} in {project}!")
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
+                                    add_position_to_session(st.session_state, position)
+                                    st.success(f"Invested {amount} {selected_token} in {project}!")
+                                else:
+                                    st.error("Supply transaction failed")
                             else:
                                 st.error("Supply transaction failed")
                         except Exception as e:
@@ -154,44 +161,37 @@ def render_grid_cards(opps_list, category_name: str):
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------- MAIN PAGE ---------------------- #
+# --- Main Render Function ---
 def render():
     st.title("⚡ Short-Term Opportunities")
     st.write("High-yield DeFi opportunities for short-term gains.")
 
-    # Initialize wallets if not already in session state
+    # Initialize wallets
     if "wallets" not in st.session_state:
         init_wallets(st.session_state)
 
-    if not short_term_opps:
-        st.warning("No short-term opportunities found.")
-    else:
-        render_grid_cards(short_term_opps, "short_term")
+    # Fetch short-term opportunities
+    @st.cache_data(ttl=300)
+    def cached_short_term():
+        return get_short_term_opportunities()  # already synchronous
 
+    with st.spinner("🔍 Scanning for short-term DeFi opportunities..."):
+        short_term_opps = cached_short_term()
+        if not short_term_opps:
+            st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
+        else:
+            render_grid_cards(short_term_opps, "short_term")
 
-# Fetch + cache
-@st.cache_data(ttl=300)
-def cached_short_term():
-    return asyncio.run(get_short_term_opportunities())
-
-short_term_opps = cached_short_term()
-
-with st.spinner("🔍 Scanning for short-term DeFi opportunities..."):
-    if not short_term_opps:
-        st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
-    else:
-        render_grid_cards(short_term_opps, "short_term")
-
-# Risk warning
-st.markdown("""
-<div class="card bg-gradient-to-br from-red-900/30 to-orange-900/30 p-4 mt-4 rounded-lg shadow-md">
-    <h3 class="text-lg font-semibold text-red-400 mb-2">⚠️ Risk Warning</h3>
-    <p class="text-indigo-200 text-sm">
-        Short-term opportunities often come with higher risk due to their high APY. 
-        Ensure you understand the risks and conduct thorough research before investing.
-    </p>
-</div>
-""", unsafe_allow_html=True)
+    # Risk warning
+    st.markdown("""
+    <div class="card bg-gradient-to-br from-red-900/30 to-orange-900/30 p-4 mt-4 rounded-lg shadow-md">
+        <h3 class="text-lg font-semibold text-red-400 mb-2">⚠️ Risk Warning</h3>
+        <p class="text-indigo-200 text-sm">
+            Short-term opportunities often come with higher risk due to their high APY. 
+            Ensure you understand the risks and conduct thorough research before investing.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     render()

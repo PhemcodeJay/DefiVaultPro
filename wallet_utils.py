@@ -157,7 +157,6 @@ explorer_urls = {
     "neon": "https://neonscan.org/tx/"
 }
 
-
 @dataclass
 class Wallet:
     chain: str
@@ -172,8 +171,11 @@ class Wallet:
         self.connected = True
         self.update_balance()
         self.update_nonce()
+        db.save_wallet(f"{self.chain}_{self.address}", self.chain, self.address, self.connected, self.verified, self.balance, self.nonce)
 
     def disconnect(self):
+        if self.address:
+            db.disconnect_wallet(f"{self.chain}_{self.address}")  # type: ignore
         self.address = None
         self.connected = False
         self.verified = False
@@ -181,50 +183,34 @@ class Wallet:
         self.nonce = None
 
     def update_balance(self):
-        w3 = self._get_web3_connection()
+        w3 = connect_to_chain(self.chain)
         if w3 and self.address:
             try:
                 checksum_address = Web3.to_checksum_address(self.address)
                 if self.chain in ERC20_TOKENS:
-                    token_address = ERC20_TOKENS[self.chain].get("USDC", None)
+                    token_address = ERC20_TOKENS[self.chain].get("USDC")
                     if token_address:
-                        token_contract = w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
-                        self.balance = float(w3.from_wei(
-                            token_contract.functions.balanceOf(checksum_address).call(),
-                            'ether'
-                        ))
+                        contract = w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=ERC20_ABI)
+                        balance_wei = contract.functions.balanceOf(checksum_address).call()
+                        self.balance = float(w3.from_wei(balance_wei, 'ether'))
                     else:
                         self.balance = float(w3.from_wei(w3.eth.get_balance(checksum_address), 'ether'))
                 else:
                     self.balance = float(w3.from_wei(w3.eth.get_balance(checksum_address), 'ether'))
+                db.save_wallet(f"{self.chain}_{self.address}", self.chain, self.address, self.connected, self.verified, self.balance, self.nonce)
             except Exception as e:
                 logger.error(f"Failed to update balance for {self.address}: {e}")
                 self.balance = 0.0
 
     def update_nonce(self):
-        w3 = self._get_web3_connection()
+        w3 = connect_to_chain(self.chain)
         if w3 and self.address:
             try:
                 self.nonce = w3.eth.get_transaction_count(Web3.to_checksum_address(self.address))
+                db.save_wallet(f"{self.chain}_{self.address}", self.chain, self.address, self.connected, self.verified, self.balance, self.nonce)
             except Exception as e:
                 logger.error(f"Failed to update nonce for {self.address}: {e}")
                 self.nonce = None
-
-    def _get_web3_connection(self) -> Optional[Web3]:
-        rpc_urls = {
-            "ethereum": os.getenv("ETH_RPC_URL", "https://mainnet.infura.io/v3/YOUR_INFURA_KEY"),
-            "bsc": os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/"),
-            "arbitrum": os.getenv("ARBITRUM_RPC_URL", "https://arb1.arbitrum.io/rpc"),
-            "optimism": os.getenv("OPTIMISM_RPC_URL", "https://mainnet.optimism.io"),
-            "base": os.getenv("BASE_RPC_URL", "https://mainnet.base.org"),
-            "avalanche": os.getenv("AVALANCHE_RPC_URL", "https://api.avax.network/ext/bc/C/rpc"),
-            "neon": os.getenv("NEON_RPC_URL", "https://mainnet.neonlabs.org"),
-        }
-        rpc_url = rpc_urls.get(self.chain)
-        if rpc_url:
-            return Web3(Web3.HTTPProvider(rpc_url))
-        return None
-
 
 @dataclass
 class Position:
@@ -236,10 +222,12 @@ class Position:
     current_value: float
     entry_date: datetime
     tx_hash: str
-    status: str = "active"
+    status: str
+    protocol: Optional[str] = None
+    apy: Optional[float] = None
+    exit_date: Optional[datetime] = None
 
-
-def build_approve_tx_data(chain: str, token_address: str, spender: str, amount: float, user_address: str) -> TxParams:
+def build_erc20_approve_tx_data(chain: str, token_address: str, spender: str, amount: float, user_address: str) -> TxParams:
     w3 = connect_to_chain(chain)
     if not w3:
         raise ValueError(f"No Web3 connection for chain {chain}")
@@ -256,7 +244,6 @@ def build_approve_tx_data(chain: str, token_address: str, spender: str, amount: 
     })
     return tx_data
 
-
 def build_aave_supply_tx_data(chain: str, pool_address: str, token_address: str, amount: float, user_address: str) -> TxParams:
     w3 = connect_to_chain(chain)
     if not w3:
@@ -267,7 +254,7 @@ def build_aave_supply_tx_data(chain: str, pool_address: str, token_address: str,
         Web3.to_checksum_address(token_address),
         amount_wei,
         Web3.to_checksum_address(user_address),
-        0  # referralCode
+        0
     ).build_transaction({
         'from': Web3.to_checksum_address(user_address),
         'gas': 200000,
@@ -275,7 +262,6 @@ def build_aave_supply_tx_data(chain: str, pool_address: str, token_address: str,
         'nonce': w3.eth.get_transaction_count(Web3.to_checksum_address(user_address))
     })
     return tx_data
-
 
 def build_aave_withdraw_tx_data(chain: str, pool_address: str, token_address: str, amount: float, user_address: str) -> TxParams:
     w3 = connect_to_chain(chain)
@@ -295,7 +281,6 @@ def build_aave_withdraw_tx_data(chain: str, pool_address: str, token_address: st
     })
     return tx_data
 
-
 def build_compound_supply_tx_data(chain: str, comet_address: str, token_address: str, amount: float, user_address: str) -> TxParams:
     w3 = connect_to_chain(chain)
     if not w3:
@@ -312,7 +297,6 @@ def build_compound_supply_tx_data(chain: str, comet_address: str, token_address:
         'nonce': w3.eth.get_transaction_count(Web3.to_checksum_address(user_address))
     })
     return tx_data
-
 
 def build_compound_withdraw_tx_data(chain: str, comet_address: str, token_address: str, amount: float, user_address: str) -> TxParams:
     w3 = connect_to_chain(chain)
@@ -331,7 +315,6 @@ def build_compound_withdraw_tx_data(chain: str, comet_address: str, token_addres
     })
     return tx_data
 
-
 def confirm_tx(chain: str, tx_hash: str) -> bool:
     try:
         w3 = connect_to_chain(chain)
@@ -343,10 +326,9 @@ def confirm_tx(chain: str, tx_hash: str) -> bool:
         logger.error(f"Failed to confirm tx {tx_hash}: {e}")
         return False
 
-
 def init_wallets(session_state):
     session_state.wallets = {chain: Wallet(chain=chain) for chain in NETWORK_NAMES.keys()}
-    db_wallets = db.get_wallets()
+    db_wallets = db.get_wallets()  # type: ignore
     for db_wallet in db_wallets:
         chain = db_wallet['chain']
         if chain in session_state.wallets:
@@ -360,7 +342,7 @@ def init_wallets(session_state):
 def get_connected_wallet(session_state, chain: str) -> Optional[Wallet]:
     if 'wallets' not in session_state:
         init_wallets(session_state)
-    return session_state.wallets.get(chain)
+    return session_state.wallets.get(chain.lower())
 
 def get_all_wallets(session_state) -> List[Wallet]:
     if 'wallets' not in session_state:
@@ -377,7 +359,8 @@ def create_position(chain: str, opportunity_name: str, token_symbol: str, amount
         current_value=amount,
         entry_date=datetime.now(),
         tx_hash=tx_hash,
-        status="pending"  # Start as pending until confirmed
+        status="pending",
+        protocol=protocol
     )
     if db.confirm_position(chain, position.id, tx_hash):
         position.status = "active"
@@ -390,19 +373,19 @@ def add_position_to_session(session_state, position: Position):
         session_state.positions = []
     session_state.positions.append(position)
     chain = position.chain
-    wallet_address = session_state.wallets[chain].address if chain in session_state.wallets and session_state.wallets[chain].address else None
-    if not wallet_address:
+    wallet = get_connected_wallet(session_state, chain)
+    if not wallet or not wallet.address:
         raise ValueError("No connected wallet for chain")
     db.save_position(
         position_id=position.id,
         chain=position.chain,
-        wallet_address=wallet_address,
+        wallet_address=wallet.address,
         opportunity_name=position.opportunity_name,
         token_symbol=position.token_symbol,
         amount_invested=position.amount_invested,
         tx_hash=position.tx_hash,
-        protocol=position.opportunity_name.lower(),
-        apy=None  # Fetch from opportunity if needed
+        protocol=position.protocol,
+        apy=position.apy
     )
 
 def close_position(session_state, position_id: str, tx_hash: Optional[str] = None):
@@ -413,6 +396,7 @@ def close_position(session_state, position_id: str, tx_hash: Optional[str] = Non
             for pos in session_state.positions:
                 if pos.id == position_id and pos.status == "active":
                     pos.status = "closed"
+                    pos.exit_date = datetime.now()
                     pos.tx_hash = tx_hash or pos.tx_hash
                     return True
     return False
@@ -421,18 +405,20 @@ def get_token_price(symbol: str) -> float:
     try:
         coingecko_ids = {
             "ETH": "ethereum",
-            "BNB": "binancecoin", 
+            "BNB": "binancecoin",
             "AVAX": "avalanche-2",
             "USDC": "usd-coin",
             "USDT": "tether",
             "DAI": "dai"
         }
-        coingecko_id = coingecko_ids.get(symbol, symbol.lower())
+        coingecko_id = coingecko_ids.get(symbol.upper(), symbol.lower())
         response = requests.get(
             f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd",
             timeout=10
         )
+        response.raise_for_status()
         data = response.json()
         return data.get(coingecko_id, {}).get("usd", 0.0)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to fetch token price for {symbol}: {e}")
         return 0.0

@@ -12,7 +12,10 @@ import subprocess
 import sys
 
 # Start defi_scanner.py as a separate process
-subprocess.Popen([sys.executable, "defi_scanner.py"])
+try:
+    subprocess.Popen([sys.executable, "defi_scanner.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+except Exception as e:
+    logging.error(f"Failed to start defi_scanner.py: {e}")
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -117,11 +120,14 @@ def load_page(selected_page: str):
             if inspect.iscoroutinefunction(render_func):
                 # Safe async execution
                 try:
-                    loop = asyncio.get_running_loop()
-                    task = loop.create_task(render_func())
-                    loop.run_until_complete(task)
-                except RuntimeError:
-                    asyncio.run(render_func())
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(render_func())
+                    else:
+                        asyncio.run(render_func())
+                except RuntimeError as e:
+                    logger.error(f"Async execution error: {e}")
+                    st.error(f"Failed to load async page: {selected_page}")
             else:
                 render_func()
         else:

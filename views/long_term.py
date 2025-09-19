@@ -1,27 +1,20 @@
+import time
 import streamlit as st
 import json
-import os
-from uuid import uuid4
-from typing import Dict, Any
-from web3 import Web3
-from dotenv import load_dotenv
 import asyncio
 import logging
-import aiohttp
-from defi_scanner import get_long_term_opportunities, YieldEntry
+from typing import Dict, Any, List
+from defi_scanner import get_long_term_opportunities
 from wallet_utils import (
     get_connected_wallet,
     create_position,
     add_position_to_session,
     NETWORK_LOGOS,
     BALANCE_SYMBOLS,
-    NETWORK_NAMES,
     CHAIN_IDS,
     ERC20_TOKENS,
-    ERC20_ABI,
     explorer_urls,
-    connect_to_chain,
-    build_approve_tx_data,
+    build_erc20_approve_tx_data,
     build_aave_supply_tx_data,
     build_compound_supply_tx_data,
     confirm_tx,
@@ -29,15 +22,11 @@ from wallet_utils import (
     CONTRACT_MAP,
     init_wallets
 )
+from utils import connect_to_chain
 from streamlit_javascript import st_javascript
 
-# --- Load Environment Variables ---
-load_dotenv()
+# --- Logging ---
 logger = logging.getLogger(__name__)
-
-def render():
-    st.title("🏛 Long-Term Opportunities")
-    st.write("Stable DeFi opportunities for long-term investment.")
 
 # --- Utility Functions ---
 def safe_get(obj, key, default):
@@ -60,41 +49,13 @@ def format_number(value: float) -> str:
     except (ValueError, TypeError):
         return str(value)
 
-# --- Async ETH price fetch ---
-async def async_get_eth_price() -> float:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
-            ) as resp:
-                data = await resp.json()
-                return data.get("ethereum", {}).get("usd", 2000.0)
-    except Exception:
-        return 2000.0
-
-# --- Async gas fee estimation ---
-async def get_chain_gas_fee(chain: str) -> float:
-    try:
-        w3 = connect_to_chain(chain)
-        if not w3:
-            return 0.0
-        gas_price = w3.eth.gas_price
-        gas_estimate = 100000
-        eth_price = await async_get_eth_price()
-        gas_fee_eth = w3.from_wei(gas_price * gas_estimate, "ether")
-        return float(gas_fee_eth) * eth_price
-    except Exception:
-        return 0.0
-
-# --- JS postMessage ---
 def get_post_message() -> Dict[str, Any]:
     return st_javascript("return window.lastMessage || {}")
 
-# --- Render DeFi grid cards ---
+# --- Render Grid Cards ---
 def render_grid_cards(
-    opps_list,
+    opps_list: List[Dict[str, Any]],
     category_name: str,
-    columns: int = 3,
     bg_color: str = "bg-gradient-to-br from-green-900/30 to-teal-900/30",
 ):
     if "expanded_cards" not in st.session_state:
@@ -147,14 +108,6 @@ def render_grid_cards(
         last_updated = safe_get(opp, "last_updated", "Unknown")
         link = safe_get(opp, "link", "#")
 
-        # Define these variables from opp safely
-        token_address = safe_get(opp, "token_address", "0x0")
-        pool_address = safe_get(opp, "pool_address", contract_address)
-        amount = safe_get(opp, "amount", 0)
-        chain_id = safe_get(opp, "chain_id", 1)  # fallback default
-        selected_token = symbol
-
-        # Format APY and TVL nicely
         try:
             apy_float = float(str(apy_str).rstrip("%"))
             apy_str = f"{apy_float:.2f}%"
@@ -162,7 +115,7 @@ def render_grid_cards(
             pass
 
         try:
-            tvl_float = float(str(tvl_str).rstrip("$").replace(",", ""))
+            tvl_float = float(str(tvl_str).lstrip("$").replace(",", ""))
             tvl_str = format_number(tvl_float)
         except:
             pass
@@ -225,47 +178,168 @@ def render_grid_cards(
                     unsafe_allow_html=True,
                 )
 
+                # --- MetaMask Investment Workflow ---
+                connected_wallet = get_connected_wallet(st.session_state, chain.lower())
+                if connected_wallet and connected_wallet.verified and connected_wallet.address:
+                    token_options = list(ERC20_TOKENS.get(chain.lower(), {}).keys()) + [
+                        BALANCE_SYMBOLS.get(chain.lower(), "Native")
+                    ]
+                    selected_token = st.selectbox("Select Token", token_options, key=f"token_{i}")
+                    token_address = ERC20_TOKENS.get(chain.lower(), {}).get(
+                        selected_token, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    )
+                    amount = st.number_input(
+                        "Amount to Invest", min_value=0.0, value=1.0, step=0.01, key=f"amount_{i}"
+                    )
+                    pool_address = CONTRACT_MAP.get(project.lower(), {}).get(chain.lower(), "")
+                    chain_id = CHAIN_IDS.get(chain.lower(), 0)
 
-# --- Page content ---
-st.markdown("""
-<div class="text-center py-8">
-    <h1 class="text-4xl font-bold mb-3 bg-clip-text text-transparent bg-gradient-to-r from-green-400 to-teal-400">🏛 Long-Term Opportunities</h1>
-    <p class="text-sm text-indigo-200">Stable DeFi opportunities for long-term investment</p>
-</div>
-""", unsafe_allow_html=True)
+                    if amount > 0 and st.button("💸 Invest with MetaMask", key=f"invest_{i}"):
+                        try:
+                            protocol = project.lower()
+                            # Approve tx
+                            approve_tx = build_erc20_approve_tx_data(
+                                chain.lower(), token_address, pool_address, amount, connected_wallet.address
+                            )
+                            approve_tx["chainId"] = chain_id
+                            st.markdown(
+                                f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>",
+                                unsafe_allow_html=True,
+                            )
+                            time.sleep(1)
+                            response = get_post_message()
+                            if (
+                                response.get("type") == "streamlit:txSuccess"
+                                and isinstance(response.get("txHash"), str)
+                                and response.get("txHash")
+                            ):
+                                if confirm_tx(chain.lower(), response["txHash"]):
+                                    st.success("Approve transaction confirmed!")
+                                else:
+                                    st.error("Approve transaction failed")
+                                    continue
+                            else:
+                                st.error("Approve transaction failed")
+                                continue
 
-if 'wallets' not in st.session_state:
-    init_wallets(st.session_state)
+                            # Supply tx
+                            if "aave" in protocol:
+                                supply_tx = build_aave_supply_tx_data(
+                                    chain.lower(), pool_address, token_address, amount, connected_wallet.address
+                                )
+                            elif "compound" in protocol:
+                                supply_tx = build_compound_supply_tx_data(
+                                    chain.lower(), pool_address, token_address, amount, connected_wallet.address
+                                )
+                            else:
+                                st.error(f"Unsupported protocol: {protocol}")
+                                continue
 
-# --- Async fetch long-term opportunities ---
+                            supply_tx["chainId"] = chain_id
+                            st.markdown(
+                                f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>",
+                                unsafe_allow_html=True,
+                            )
+                            time.sleep(1)
+                            response = get_post_message()
+                            if (
+                                response.get("type") == "streamlit:txSuccess"
+                                and isinstance(response.get("txHash"), str)
+                                and response.get("txHash")
+                            ):
+                                if confirm_tx(chain.lower(), response["txHash"]):
+                                    position = create_position(
+                                        chain.lower(), project, selected_token, amount, response["txHash"]
+                                    )
+                                    add_position_to_session(st.session_state, position)
+                                    st.success(f"Invested {amount} {selected_token} in {project}!")
+                                else:
+                                    st.error("Supply transaction failed")
+                            else:
+                                st.error("Supply transaction failed")
+                        except Exception as e:
+                            st.error(f"Investment failed: {str(e)}")
+                        st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# --- Main Render Function ---
+def render():
+    st.title("🏛 Long-Term Opportunities")
+    st.write("Stable DeFi opportunities for long-term investment.")
+
+    # Initialize wallets
+    if "wallets" not in st.session_state:
+        init_wallets(st.session_state)
+
+# Fetch long-term opportunities
 @st.cache_data(ttl=300)
 def cached_get_long_term_opportunities():
-    results = asyncio.run(get_long_term_opportunities())
-    # Ensure results are serializable (convert custom objects to dicts)
-    serializable = [
-    vars(r) if hasattr(r, "__dict__") else dict(r) if isinstance(r, (list, tuple)) else r
-    for r in results
-]
+    try:
+        results = get_long_term_opportunities()
+        # If it's a coroutine, await it
+        if asyncio.iscoroutine(results):
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                results = asyncio.ensure_future(results)
+                results = loop.run_until_complete(results)
+            else:
+                results = asyncio.run(results)
+    except Exception as e:
+        logger.error(f"Error fetching long term opportunities: {e}")
+        return []
+
+    # Ensure results are serializable
+    serializable = []
+    for r in results:
+        if hasattr(r, "__dict__"):
+            serializable.append(vars(r))
+        elif isinstance(r, dict):
+            serializable.append(r)
+        else:
+            try:
+                serializable.append(dict(r))
+            except Exception:
+                serializable.append(r)
     return serializable
 
-def main():
+
     st.subheader("🏛 Stable Opportunities")
-    long_term_opps = cached_get_long_term_opportunities()
-    logger.info(f"Fetched {len(long_term_opps)} long-term opportunities for rendering")
-    if not long_term_opps:
-        st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
-    else:
-        render_grid_cards(long_term_opps, "long_term")
+    with st.spinner("🔍 Scanning for long-term opportunities..."):
+        results = cached_get_long_term_opportunities()
 
-main()
+        # Ensure serializable
+        long_term_opps: List[Dict[str, Any]] = []
+        for r in results:
+            if hasattr(r, "__dict__"):
+                long_term_opps.append(vars(r))
+            elif isinstance(r, dict):
+                long_term_opps.append(r)
+            else:
+                try:
+                    long_term_opps.append(dict(r))
+                except Exception:
+                    long_term_opps.append({"value": str(r)})
 
-# --- Additional Info ---
-st.markdown("""
-<div class="card bg-gradient-to-br from-green-900/30 to-teal-900/30 p-4 mt-4 rounded-lg shadow-md">
-    <h3 class="text-lg font-semibold text-green-400 mb-2">💡 Selection Criteria</h3>
-    <p class="text-indigo-200 text-sm">
-        Long-term opportunities are selected for their stability, low risk, and high liquidity (TVL). 
-        Ideal for consistent returns over extended periods.
-    </p>
-</div>
-""", unsafe_allow_html=True)
+        logger.info(f"Fetched {len(long_term_opps)} long-term opportunities for rendering")
+        if not long_term_opps:
+            st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
+        else:
+            render_grid_cards(long_term_opps, "long_term")
+
+    # Additional Info
+    st.markdown(
+        """
+    <div class="card bg-gradient-to-br from-green-900/30 to-teal-900/30 p-4 mt-4 rounded-lg shadow-md">
+        <h3 class="text-lg font-semibold text-green-400 mb-2">💡 Selection Criteria</h3>
+        <p class="text-indigo-200 text-sm">
+            Long-term opportunities are selected for their stability, low risk, and high liquidity (TVL). 
+            Ideal for consistent returns over extended periods.
+        </p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+if __name__ == "__main__":
+    render()

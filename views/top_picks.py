@@ -7,15 +7,16 @@ from wallet_utils import (
     init_wallets, get_connected_wallet, add_position_to_session,
     create_position, NETWORK_LOGOS, BALANCE_SYMBOLS, ERC20_TOKENS,
     ERC20_ABI, CHAIN_IDS, CONTRACT_MAP, PROTOCOL_LOGOS, explorer_urls,
-    connect_to_chain, build_approve_tx_data, build_aave_supply_tx_data,
+    build_erc20_approve_tx_data, build_aave_supply_tx_data,
     build_compound_supply_tx_data, confirm_tx
 )
+from utils import connect_to_chain
 from defi_scanner import YieldEntry, get_top_picks
 from streamlit_javascript import st_javascript
 
 logger = logging.getLogger(__name__)
 
-# ---------------------- UTILITY FUNCTIONS ---------------------- #
+# --- Utility Functions ---
 def safe_get(obj, key, default):
     if hasattr(obj, key):
         return getattr(obj, key, default)
@@ -39,7 +40,7 @@ def format_number(value: float) -> str:
 def get_post_message():
     return st_javascript("return window.lastMessage || {}")
 
-# ---------------------- RENDER GRID CARDS ---------------------- #
+# --- Render Grid Cards ---
 def render_grid_cards(opps_list, category_name: str):
     if "expanded_cards" not in st.session_state:
         st.session_state.expanded_cards = {}
@@ -90,7 +91,6 @@ def render_grid_cards(opps_list, category_name: str):
             </div>
         """, unsafe_allow_html=True)
 
-        # Expand details
         expanded = st.checkbox("Expand", value=expanded, key=f"{card_key}_checkbox", label_visibility="collapsed")
         st.session_state.expanded_cards[card_key] = expanded
 
@@ -118,13 +118,17 @@ def render_grid_cards(opps_list, category_name: str):
                         try:
                             protocol = project.lower()
                             # Approve
-                            approve_tx = build_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
+                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
                             approve_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
                             response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and confirm_tx(chain.lower(), response['txHash']):
-                                st.success("Approve transaction confirmed!")
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    st.success("Approve transaction confirmed!")
+                                else:
+                                    st.error("Approve transaction failed")
+                                    continue
                             else:
                                 st.error("Approve transaction failed")
                                 continue
@@ -139,13 +143,16 @@ def render_grid_cards(opps_list, category_name: str):
                                 continue
 
                             supply_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
                             response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and confirm_tx(chain.lower(), response['txHash']):
-                                position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
-                                add_position_to_session(st.session_state, position)
-                                st.success(f"Invested {amount} {selected_token} in {project}!")
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
+                                    add_position_to_session(st.session_state, position)
+                                    st.success(f"Invested {amount} {selected_token} in {project}!")
+                                else:
+                                    st.error("Supply transaction failed")
                             else:
                                 st.error("Supply transaction failed")
                         except Exception as e:
@@ -154,7 +161,7 @@ def render_grid_cards(opps_list, category_name: str):
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------- MAIN PAGE ---------------------- #
+# --- Main Render Function ---
 def render():
     st.title("🏆 Top Picks")
     st.write("Curated DeFi opportunities with balanced risk and reward.")
@@ -164,23 +171,16 @@ def render():
         init_wallets(st.session_state)
 
     # Fetch top picks
-    top_picks = asyncio.run(get_top_picks())
+    @st.cache_data(ttl=300)
+    def cached_top_picks():
+        return get_top_picks()
 
     with st.spinner("🔍 Scanning for top DeFi opportunities..."):
+        top_picks = cached_top_picks()
         if not top_picks:
             st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
         else:
             render_grid_cards(top_picks, "top_picks")
 
-# ---------------------- FETCH + CACHE TOP PICKS ---------------------- #
-@st.cache_data(ttl=300)
-def cached_top_picks():
-    return asyncio.run(get_top_picks())
-
-top_picks = cached_top_picks()
-
-with st.spinner("🔍 Scanning for top DeFi opportunities..."):
-    if not top_picks:
-        st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
-    else:
-        render_grid_cards(top_picks, "top_picks")
+if __name__ == "__main__":
+    render()

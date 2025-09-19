@@ -7,26 +7,15 @@ from wallet_utils import (
     init_wallets, get_connected_wallet, add_position_to_session,
     create_position, NETWORK_LOGOS, BALANCE_SYMBOLS, ERC20_TOKENS,
     ERC20_ABI, CHAIN_IDS, CONTRACT_MAP, PROTOCOL_LOGOS, explorer_urls,
-    connect_to_chain, build_approve_tx_data, build_aave_supply_tx_data,
+    build_erc20_approve_tx_data, build_aave_supply_tx_data,
     build_compound_supply_tx_data, confirm_tx
 )
+from utils import connect_to_chain
 from defi_scanner import get_layer2_opportunities, YieldEntry
 from streamlit_javascript import st_javascript
 
 # --- Logging ---
 logger = logging.getLogger(__name__)
-
-# --- Page Title ---
-st.title("🚀 Layer 2 Focus")
-st.write("Explore efficient DeFi opportunities on Layer 2 networks.")
-
-# --- Supported Chains ---
-SUPPORTED_CHAINS = ["ethereum", "bsc", "solana", "arbitrum", "optimism", "base", "avalanche", "neon"]
-LAYER2_CHAINS = ["arbitrum", "optimism", "base"]  # Layer 2 chains for default
-
-# --- Initialize wallets ---
-if 'wallets' not in st.session_state:
-    init_wallets(st.session_state)
 
 # --- Utility Functions ---
 def safe_get(obj, key, default):
@@ -132,13 +121,17 @@ def render_grid_cards(opps_list, category_name: str):
                         try:
                             protocol = project.lower()
                             # Approve tx
-                            approve_tx = build_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
+                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
                             approve_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
                             response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and confirm_tx(chain.lower(), response['txHash']):
-                                st.success("Approve transaction confirmed!")
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    st.success("Approve transaction confirmed!")
+                                else:
+                                    st.error("Approve transaction failed")
+                                    continue
                             else:
                                 st.error("Approve transaction failed")
                                 continue
@@ -153,13 +146,16 @@ def render_grid_cards(opps_list, category_name: str):
                                 continue
 
                             supply_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
                             response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and confirm_tx(chain.lower(), response['txHash']):
-                                position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
-                                add_position_to_session(st.session_state, position)
-                                st.success(f"Invested {amount} {selected_token} in {project}!")
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
+                                    add_position_to_session(st.session_state, position)
+                                    st.success(f"Invested {amount} {selected_token} in {project}!")
+                                else:
+                                    st.error("Supply transaction failed")
                             else:
                                 st.error("Supply transaction failed")
                         except Exception as e:
@@ -168,23 +164,38 @@ def render_grid_cards(opps_list, category_name: str):
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# --- Chain Selection ---
-selected_chains = st.multiselect(
-    "Select Chains",
-    SUPPORTED_CHAINS,
-    default=LAYER2_CHAINS,
-    format_func=lambda x: f"⚡ {x.capitalize()}" if x in LAYER2_CHAINS else x.capitalize()
-)
+# --- Main Render Function ---
+def render():
+    st.title("🚀 Layer 2 Focus")
+    st.write("Explore efficient DeFi opportunities on Layer 2 networks.")
 
-# --- Fetch Layer2 Opportunities ---
-@st.cache_data(ttl=300)
-def cached_layer2_opps():
-    return asyncio.run(get_layer2_opportunities())
+    # Initialize wallets
+    if 'wallets' not in st.session_state:
+        init_wallets(st.session_state)
 
-layer2_opps = cached_layer2_opps()
-# Filter by selected chains
-layer2_opps = [o for o in layer2_opps if o.chain.lower() in selected_chains]
+    # Chain Selection
+    SUPPORTED_CHAINS = ["ethereum", "bsc", "solana", "arbitrum", "optimism", "base", "avalanche", "neon"]
+    LAYER2_CHAINS = ["arbitrum", "optimism", "base"]
+    selected_chains = st.multiselect(
+        "Select Chains",
+        SUPPORTED_CHAINS,
+        default=LAYER2_CHAINS,
+        format_func=lambda x: f"⚡ {x.capitalize()}" if x in LAYER2_CHAINS else x.capitalize()
+    )
 
-# --- Render ---
-st.subheader("🚀 Layer 2 Opportunities")
-render_grid_cards(layer2_opps, "layer2_focus")
+    # Fetch Layer2 Opportunities
+    @st.cache_data(ttl=300)
+    def cached_layer2_opps():
+        return get_layer2_opportunities()
+
+    st.subheader("🚀 Layer 2 Opportunities")
+    with st.spinner("🔍 Scanning for Layer 2 opportunities..."):
+        layer2_opps = cached_layer2_opps()
+        layer2_opps = [o for o in layer2_opps if safe_get(o, "chain", "unknown").lower() in selected_chains]
+        if not layer2_opps:
+            st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
+        else:
+            render_grid_cards(layer2_opps, "layer2_focus")
+
+if __name__ == "__main__":
+    render()

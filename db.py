@@ -1,7 +1,7 @@
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer, Text, MetaData, select
+from sqlalchemy import create_engine, Column, String, Float, DateTime, Boolean, Integer, Text, select
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
@@ -42,25 +42,7 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
 # Database Models
-from sqlalchemy import (
-    Column,
-    String,
-    Float,
-    Integer,
-    Boolean,
-    DateTime,
-)
-from sqlalchemy.orm import declarative_base
-from datetime import datetime
-
-Base = declarative_base()
-
-
-# ---------------------------------
-# Wallet Table
-# ---------------------------------
 class Wallet(Base):
     __tablename__ = "wallets"
 
@@ -74,10 +56,6 @@ class Wallet(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-
-# ---------------------------------
-# Position Table
-# ---------------------------------
 class Position(Base):
     __tablename__ = "positions"
 
@@ -97,10 +75,6 @@ class Position(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-
-# ---------------------------------
-# Opportunity Table
-# ---------------------------------
 class Opportunity(Base):
     __tablename__ = "opportunities"
 
@@ -116,10 +90,6 @@ class Opportunity(Base):
     last_updated = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
 
-
-# ---------------------------------
-# Meme Opportunities Table
-# ---------------------------------
 class MemeOpportunity(Base):
     __tablename__ = "meme_opportunities"
 
@@ -182,7 +152,6 @@ def save_wallet(wallet_id: str, chain: str, address: str, connected: bool = Fals
         with get_db_session() as session:
             wallet = session.query(Wallet).filter_by(id=wallet_id).first()
             if wallet:
-                # Update existing wallet using setattr to avoid direct Column assignment
                 setattr(wallet, 'address', address)
                 setattr(wallet, 'connected', connected)
                 setattr(wallet, 'verified', verified)
@@ -236,7 +205,7 @@ def disconnect_wallet(wallet_id: str) -> bool:
                 setattr(wallet, 'updated_at', datetime.utcnow())
                 session.merge(wallet)
                 return True
-        return False
+            return False
     except Exception as e:
         logger.error(f"Failed to disconnect wallet: {e}")
         return False
@@ -268,39 +237,35 @@ def close_position(position_id: str, tx_hash: Optional[str] = None) -> bool:
     try:
         with get_db_session() as session:
             position = session.query(Position).filter_by(id=position_id).first()
-            if position is None:
-                return False
-
-            if position is not None and str(position.status) == "active":
-                setattr(position, 'status', 'closed')  # Use setattr to avoid type issues
+            if position:
+                setattr(position, 'status', 'closed')
                 setattr(position, 'exit_date', datetime.utcnow())
+                setattr(position, 'tx_hash', tx_hash or position.tx_hash)
                 setattr(position, 'updated_at', datetime.utcnow())
-                if tx_hash:
-                    setattr(position, 'tx_hash', tx_hash)  # Update with closing tx if provided
                 session.merge(position)
                 return True
-
             return False
     except Exception as e:
         logger.error(f"Failed to close position: {e}")
         return False
 
-
 def confirm_position(chain: str, position_id: str, tx_hash: str) -> bool:
-    """Confirm a position's transaction is successful."""
+    """Confirm a position's transaction was successful."""
     try:
         w3 = connect_to_chain(chain)
         if w3 is None:
             logger.error(f"Failed to connect to chain: {chain}")
             return False
-        receipt = w3.eth.wait_for_transaction_receipt(HexBytes(tx_hash), timeout=300)  # Convert to HexBytes
+        receipt = w3.eth.wait_for_transaction_receipt(HexBytes(tx_hash), timeout=300)
         if receipt["status"] == 1:
             with get_db_session() as session:
                 position = session.query(Position).filter_by(id=position_id).first()
                 if position:
-                    setattr(position, 'updated_at', datetime.utcnow())  # Use setattr to avoid type issues
+                    setattr(position, 'status', 'active')
+                    setattr(position, 'updated_at', datetime.utcnow())
                     session.merge(position)
                     return True
+                return False
         return False
     except Exception as e:
         logger.error(f"Failed to confirm position tx {tx_hash}: {e}")
@@ -316,7 +281,7 @@ def update_position_value(position_id: str, new_value: float) -> bool:
                 setattr(position, 'updated_at', datetime.utcnow())
                 session.merge(position)
                 return True
-        return False
+            return False
     except Exception as e:
         logger.error(f"Failed to update position value: {e}")
         return False
@@ -365,7 +330,7 @@ def get_active_positions(wallet_address: Optional[str] = None) -> List[Dict[str,
                 'opportunity_name': p.opportunity_name,
                 'token_symbol': p.token_symbol,
                 'amount_invested': p.amount_invested,
-                'current_value': p.current_value,  # Fixed typo (was current_value12)
+                'current_value': p.current_value,
                 'entry_date': p.entry_date,
                 'tx_hash': p.tx_hash,
                 'protocol': p.protocol,
@@ -381,7 +346,7 @@ def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
         with get_db_session() as session:
             for data in opp_data:
                 opp = Opportunity(
-                    id=data['id'],
+                    id=data.get('id', None),
                     project=data['project'],
                     symbol=data['symbol'],
                     chain=data['chain'],
@@ -429,7 +394,7 @@ def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
         with get_db_session() as session:
             for data in meme_data:
                 meme_opp = MemeOpportunity(
-                    id=data['id'],
+                    id=data.get('id', None),
                     project=data['project'],
                     name=data['name'],
                     symbol=data['symbol'],
@@ -512,7 +477,7 @@ def cleanup_old_data(days: int = 30) -> bool:
     except Exception as e:
         logger.error(f"Failed to cleanup old data: {e}")
         return False
-    
+
 # --- Auto initialize DB on import ---
 try:
     if test_connection():
@@ -522,8 +487,6 @@ try:
         logger.error("Database connection failed on import")
 except Exception as e:
     logger.error(f"Failed to auto initialize database: {e}")
-
-
 
 if __name__ == "__main__":
     if test_connection():

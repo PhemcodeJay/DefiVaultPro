@@ -4,7 +4,7 @@ import time
 import json
 import logging
 from typing import List
-from defi_scanner import get_meme_opportunities, MemeEntry
+from defi_scanner import fetch_meme_coins, MemeEntry
 from wallet_utils import (
     init_wallets,
     get_connected_wallet,
@@ -24,7 +24,7 @@ from streamlit_javascript import st_javascript
 
 logger = logging.getLogger(__name__)
 
-# ---------------------- UTILITIES ---------------------- #
+# --- Utility Functions ---
 def safe_get(obj, key, default):
     if hasattr(obj, key):
         return getattr(obj, key, default)
@@ -45,7 +45,10 @@ def format_number(value: float) -> str:
     except:
         return str(value)
 
-# ---------------------- RENDER GRID CARDS ---------------------- #
+def get_post_message():
+    return st_javascript("return window.lastMessage || {}")
+
+# --- Render Grid Cards ---
 def render_meme_grid_cards(memes_list: List[MemeEntry], category_name: str):
     if "expanded_cards" not in st.session_state:
         st.session_state.expanded_cards = {}
@@ -129,13 +132,14 @@ def render_meme_grid_cards(memes_list: List[MemeEntry], category_name: str):
                                 "value": 0,
                                 "chainId": CHAIN_IDS.get(chain.lower(), 0)
                             }
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
-                            response = st_javascript("return window.lastMessage || {}")
-                            if response.get("type") != "streamlit:txSuccess":
+                            response = get_post_message()
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                st.success("Approve confirmed!")
+                            else:
                                 st.error("Approve failed")
                                 continue
-                            st.success("Approve confirmed!")
 
                             swap_tx = {
                                 "from": connected_wallet.address,
@@ -144,10 +148,10 @@ def render_meme_grid_cards(memes_list: List[MemeEntry], category_name: str):
                                 "value": 0,
                                 "chainId": CHAIN_IDS.get(chain.lower(), 0)
                             }
-                            st.markdown(f"<script>performDeFiAction('swap',{json.dumps(swap_tx)});</script>", unsafe_allow_html=True)
+                            st.markdown(f"<script>performDeFiAction('swap',{json.dumps(swap_tx)});</script>", unsafe_allow_html=True)  # type: ignore
                             time.sleep(1)
-                            swap_resp = st_javascript("return window.lastMessage || {}")
-                            if swap_resp.get("type") == "streamlit:txSuccess":
+                            swap_resp = get_post_message()
+                            if swap_resp.get("type") == "streamlit:txSuccess" and isinstance(swap_resp.get("txHash"), str) and swap_resp.get("txHash"):
                                 position = create_position(chain.lower(), symbol, selected_token, amount, swap_resp['txHash'])
                                 add_position_to_session(st.session_state, position)
                                 st.success(f"Swapped {amount} {selected_token} for {symbol}!")
@@ -159,37 +163,37 @@ def render_meme_grid_cards(memes_list: List[MemeEntry], category_name: str):
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------- MAIN PAGE ---------------------- #
+# --- Main Render Function ---
 def render():
     st.title("🐸 Meme Coins")
     st.write("Trending meme coins and speculative plays.")
 
-    # Initialize wallets if not already in session state
+    # Initialize wallets
     if "wallets" not in st.session_state:
         init_wallets(st.session_state)
 
-@st.cache_data(ttl=300)
-def cached_get_meme_coins() -> List[MemeEntry]:
-    return asyncio.run(get_meme_opportunities())
+    # Fetch meme coins
+    @st.cache_data(ttl=300)
+    def cached_get_meme_coins() -> List[MemeEntry]:
+        return asyncio.run(fetch_meme_coins())
 
-with st.spinner("🔍 Scanning for trending meme coins..."):
-    meme_coins = cached_get_meme_coins()
-    if not meme_coins:
-        st.error("No meme coins found.")
+    with st.spinner("🔍 Scanning for trending meme coins..."):
+        meme_coins = cached_get_meme_coins()
+        if not meme_coins:
+            st.error("No meme coins found.")
+        else:
+            render_meme_grid_cards(meme_coins, "meme_coins")
 
-render_meme_grid_cards(meme_coins, "meme_coins")
-
-# Risk warning
-st.markdown("""
-<div class="card bg-gradient-to-br from-yellow-900/30 to-orange-900/30 p-4 mt-4 rounded-lg shadow-md">
-    <h3 class="text-lg font-semibold text-yellow-400 mb-2">⚠️ Risk Warning</h3>
-    <p class="text-indigo-200 text-sm">
-        Meme coins are highly speculative and volatile. Only invest what you can afford to lose, 
-        and conduct thorough research before participating in these markets.
-    </p>
-</div>
-""", unsafe_allow_html=True)
+    # Risk warning
+    st.markdown("""
+    <div class="card bg-gradient-to-br from-yellow-900/30 to-orange-900/30 p-4 mt-4 rounded-lg shadow-md">
+        <h3 class="text-lg font-semibold text-yellow-400 mb-2">⚠️ Risk Warning</h3>
+        <p class="text-indigo-200 text-sm">
+            Meme coins are highly speculative and volatile. Only invest what you can afford to lose, 
+            and conduct thorough research before participating in these markets.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     render()
-
