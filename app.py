@@ -11,12 +11,6 @@ import inspect
 import subprocess
 import sys
 
-# Start defi_scanner.py as a separate process
-try:
-    subprocess.Popen([sys.executable, "defi_scanner.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-except Exception as e:
-    logging.error(f"Failed to start defi_scanner.py: {e}")
-
 # --- Load Environment Variables ---
 load_dotenv()
 
@@ -30,22 +24,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Initialize DB ---
-if not db.test_connection():
-    st.error("Database connection failed. Using fallback mode.")
+# --- Start defi_scanner.py at startup ---
+try:
+    subprocess.Popen([sys.executable, "defi_scanner.py"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    logger.info("Started defi_scanner.py successfully.")
+except Exception as e:
+    logger.error(f"Failed to start defi_scanner.py: {e}")
+
+# --- Initialize Database ---
+if db.test_connection():
+    logger.info("Database connection successful.")
+    if db.init_database():
+        st.success("Database initialized successfully.")
+    else:
+        st.warning("Database initialization failed or tables already exist.")
 else:
-    if not db.init_database():
-        st.warning("Database initialization failed. Tables may already exist.")
+    st.error("Database connection failed. Some features may not work.")
 
 # --- Page Config ---
 st.set_page_config(
-    page_title="DeFi Dashboard",
+    page_title="💰 DeFi Dashboard",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- Hide Streamlit default menu and footer ---
+# --- App Header and Description ---
+st.markdown(
+    """
+    # 💰 DeFi Dashboard
+    **Real-time multi-chain DeFi scanner**  
+    Track top yield opportunities, meme coins, and your wallet positions.  
+    Powered by MetaMask & Web3 for secure, fast interactions.
+    """,
+    unsafe_allow_html=True
+)
+
+# --- Hide default Streamlit menu/footer ---
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
@@ -87,7 +102,7 @@ if 'wallets' not in st.session_state:
 if 'positions' not in st.session_state:
     st.session_state.positions = db.get_positions()
 
-# --- Page Mapping ---
+# --- Sidebar Navigation & Page Loader ---
 PAGE_MODULES = {
     "🏆 Top Picks": "views.top_picks",
     "⚡ Short Term": "views.short_term",
@@ -98,14 +113,13 @@ PAGE_MODULES = {
     "👛 Wallets": "views.wallets"
 }
 
-# --- Sidebar Navigation with Buttons ---
 st.sidebar.markdown("<h3 style='color:#6366f1;'>Navigation</h3>", unsafe_allow_html=True)
 for page_name in PAGE_MODULES.keys():
     if st.sidebar.button(page_name, key=page_name):
         st.session_state.selected_page = page_name
         st.rerun()  # Correct rerun
 
-# --- Page Loader (supports async and sync render functions) ---
+# --- Load the selected page ---
 def load_page(selected_page: str):
     module_name = PAGE_MODULES.get(selected_page)
     if not module_name:
@@ -115,10 +129,8 @@ def load_page(selected_page: str):
     try:
         page_module = importlib.import_module(module_name)
         render_func = getattr(page_module, "render", None)
-
         if callable(render_func):
             if inspect.iscoroutinefunction(render_func):
-                # Safe async execution
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
@@ -137,7 +149,6 @@ def load_page(selected_page: str):
     except Exception as e:
         st.error(f"Error rendering page: {str(e)}")
 
-# --- Load the selected page ---
 load_page(st.session_state.selected_page)
 
 # --- Sidebar Footer ---

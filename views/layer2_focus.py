@@ -1,17 +1,15 @@
 import streamlit as st
-import asyncio
 import time
 import json
 import logging
 from wallet_utils import (
     init_wallets, get_connected_wallet, add_position_to_session,
     create_position, NETWORK_LOGOS, BALANCE_SYMBOLS, ERC20_TOKENS,
-    ERC20_ABI, CHAIN_IDS, CONTRACT_MAP, PROTOCOL_LOGOS, explorer_urls,
+    CHAIN_IDS, CONTRACT_MAP, PROTOCOL_LOGOS, explorer_urls,
     build_erc20_approve_tx_data, build_aave_supply_tx_data,
     build_compound_supply_tx_data, confirm_tx
 )
-from utils import connect_to_chain
-from defi_scanner import get_layer2_opportunities, YieldEntry
+from utils import get_layer2_opportunities
 from streamlit_javascript import st_javascript
 
 # --- Logging ---

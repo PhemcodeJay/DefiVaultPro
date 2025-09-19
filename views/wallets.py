@@ -1,5 +1,4 @@
 import os
-import uuid
 import streamlit as st
 from dotenv import load_dotenv
 from streamlit_javascript import st_javascript
@@ -10,7 +9,6 @@ from wallet_utils import (
     NETWORK_NAMES,
     NETWORK_LOGOS,
     BALANCE_SYMBOLS,
-    Wallet,
 )
 from web3 import Web3
 from typing import Optional

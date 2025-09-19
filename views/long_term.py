@@ -4,7 +4,7 @@ import json
 import asyncio
 import logging
 from typing import Dict, Any, List
-from defi_scanner import get_long_term_opportunities
+from utils import get_long_term_opportunities
 from wallet_utils import (
     get_connected_wallet,
     create_position,
@@ -22,7 +22,6 @@ from wallet_utils import (
     CONTRACT_MAP,
     init_wallets
 )
-from utils import connect_to_chain
 from streamlit_javascript import st_javascript
 
 # --- Logging ---
@@ -272,37 +271,36 @@ def render():
     if "wallets" not in st.session_state:
         init_wallets(st.session_state)
 
-# Fetch long-term opportunities
-@st.cache_data(ttl=300)
-def cached_get_long_term_opportunities():
-    try:
-        results = get_long_term_opportunities()
-        # If it's a coroutine, await it
-        if asyncio.iscoroutine(results):
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                results = asyncio.ensure_future(results)
-                results = loop.run_until_complete(results)
-            else:
-                results = asyncio.run(results)
-    except Exception as e:
-        logger.error(f"Error fetching long term opportunities: {e}")
-        return []
+    # Fetch long-term opportunities
+    @st.cache_data(ttl=300)
+    def cached_get_long_term_opportunities():
+        try:
+            results = get_long_term_opportunities()
+            # If it's a coroutine, await it
+            if asyncio.iscoroutine(results):
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    results = asyncio.ensure_future(results)
+                    results = loop.run_until_complete(results)
+                else:
+                    results = asyncio.run(results)
+        except Exception as e:
+            logger.error(f"Error fetching long term opportunities: {e}")
+            return []
 
-    # Ensure results are serializable
-    serializable = []
-    for r in results:
-        if hasattr(r, "__dict__"):
-            serializable.append(vars(r))
-        elif isinstance(r, dict):
-            serializable.append(r)
-        else:
-            try:
-                serializable.append(dict(r))
-            except Exception:
+        # Ensure results are serializable
+        serializable = []
+        for r in results:
+            if hasattr(r, "__dict__"):
+                serializable.append(vars(r))
+            elif isinstance(r, dict):
                 serializable.append(r)
-    return serializable
-
+            else:
+                try:
+                    serializable.append(dict)
+                except Exception:
+                    serializable.append(r)
+        return serializable
 
     st.subheader("🏛 Stable Opportunities")
     with st.spinner("🔍 Scanning for long-term opportunities..."):

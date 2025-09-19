@@ -1,35 +1,21 @@
 import asyncio
 import json
 import time
-import uuid
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any
+from typing import List
 import aiohttp
-from sqlalchemy import create_engine, Column, String, Float
-from sqlalchemy.orm import declarative_base, sessionmaker
 import db
+import logging
 
 # ---------------------------------
-# Database Setup
+# Logging setup
 # ---------------------------------
-Base = declarative_base()
-engine = create_engine("sqlite:///defi_dashboard.db")
-SessionLocal = sessionmaker(bind=engine)
-
-class Opportunity(Base):
-    __tablename__ = "opportunities"
-
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    chain = Column(String)
-    protocol = Column(String)
-    symbol = Column(String)
-    type = Column(String)
-    apy = Column(Float)
-    tvl = Column(Float)
-    risk = Column(String)
-    link = Column(String)
-
-Base.metadata.create_all(engine)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    filename="defi_scanner.log",
+    filemode="a",
+)
 
 # ---------------------------------
 # Dataclasses
@@ -76,16 +62,15 @@ class MemeEntry:
 # Config
 # ---------------------------------
 MIN_APY = 5
-MIN_TVL = 100000
+MIN_TVL = 100_000
 FOCUS_PROTOCOLS = ["aave", "compound", "uniswap", "curve"]
 MEME_CHAINS = ["ethereum", "bsc", "solana"]
-RESCAN_INTERVAL = 3600
+RESCAN_INTERVAL = 3600  # 1 hour
 
 # ---------------------------------
 # Utils
 # ---------------------------------
 async def async_request(url: str) -> dict:
-    """Safe async HTTP request with timeout + retries"""
     retries = 3
     for attempt in range(retries):
         try:
@@ -94,26 +79,23 @@ async def async_request(url: str) -> dict:
                     return await resp.json()
         except Exception as e:
             if attempt == retries - 1:
+                logging.error(f"Failed request to {url}: {e}")
                 return {"error": str(e)}
             await asyncio.sleep(1)
-    return {"error": "All retry attempts failed"}
+    return {"error": "All retries failed"}
 
 def risk_score(apy: float, tvl: float, project: str) -> float:
-    base = 1.0
-    if apy > 20:
-        base += 1
-    if tvl < 1000000:
-        base += 1
-    if project.lower() not in FOCUS_PROTOCOLS:
-        base += 0.5
-    return base
+    score = 1.0
+    if apy > 20: score += 1
+    if tvl < 1_000_000: score += 1
+    if project.lower() not in FOCUS_PROTOCOLS: score += 0.5
+    return score
 
 async def estimate_gas_fee(chain: str) -> dict:
-    # Placeholder gas estimator
     return {"fee": 2.5, "price": 1.0, "url": f"https://gasstation/{chain}"}
 
 # ---------------------------------
-# Fetch Yields (DefiLlama)
+# Fetch Yields
 # ---------------------------------
 async def fetch_yields() -> List[YieldEntry]:
     url = "https://yields.llama.fi/pools"
@@ -131,12 +113,7 @@ async def fetch_yields() -> List[YieldEntry]:
             gas_info = await estimate_gas_fee(pool.get("chain", "").lower())
             ror = pool.get("apy", 0) / risk_score(pool.get("apy", 0), pool.get("tvlUsd", 0), pool.get("project", ""))
 
-            link = pool.get("url", "")
-            if not link:
-                if "pool" in pool:
-                    link = f"https://defillama.com/yields/pool/{pool['pool']}"
-                else:
-                    link = "https://defillama.com/yields/pools"
+            link = pool.get("url") or f"https://defillama.com/yields/pool/{pool.get('pool', '')}"
 
             entries.append(
                 YieldEntry(
@@ -163,76 +140,83 @@ async def fetch_yields() -> List[YieldEntry]:
     return entries
 
 # ---------------------------------
-# Fetch Meme Coins (Dexscreener)
+# Fetch Meme Coins
 # ---------------------------------
 async def fetch_meme_coins() -> List[MemeEntry]:
     queries = ["pepe", "doge", "shiba", "floki", "bonk", "wif", "popcat"]
-    results = await asyncio.gather(
-        *(async_request(f"https://api.dexscreener.com/latest/dex/search?q={q}") for q in queries)
-    )
+    results = await asyncio.gather(*(async_request(f"https://api.dexscreener.com/latest/dex/search?q={q}") for q in queries))
 
     entries = []
     for result in results:
-        if "error" in result:
-            continue
-
+        if "error" in result: continue
         for pair in result.get("pairs", []):
             chain = pair.get("chainId", "unknown").lower()
-            if chain not in MEME_CHAINS:
-                continue
+            if chain not in MEME_CHAINS: continue
 
             liquidity = float(pair.get("liquidity", {}).get("usd", 0))
             volume_24h = float(pair.get("volume", {}).get("h24", 0))
             change_24h = float(pair.get("priceChange", {}).get("h24", 0))
+            if liquidity < 10_000 or volume_24h < 10_000: continue
 
-            if liquidity > 10_000 and volume_24h > 10_000:
-                pair_address = pair.get("pairAddress", "")
-                if pair_address:
-                    url = pair.get("url") or f"https://dexscreener.com/{chain}/{pair_address}"
-                else:
-                    url = "https://dexscreener.com"
+            pair_address = pair.get("pairAddress", "")
+            url = pair.get("url") or f"https://dexscreener.com/{chain}/{pair_address}" if pair_address else "https://dexscreener.com"
 
-                entries.append(
-                    MemeEntry(
-                        chain=chain,
-                        symbol=pair.get("baseToken", {}).get("symbol", "Unknown"),
-                        price_usd=(f"${float(pair.get('priceUsd', 0)):.4f}"
-                                  if float(pair.get("priceUsd", 0)) < 1
-                                  else f"${float(pair.get('priceUsd', 0)):.2f}"),
-                        liquidity_usd=f"${liquidity:,.0f}",
-                        volume_24h_usd=f"${volume_24h:,.0f}",
-                        change_24h_pct=f"{change_24h:.2f}%",
-                        risk="High" if abs(change_24h) > 20 else "Medium",
-                        url=url,
-                        contract_address=pair.get("baseToken", {}).get("address", "unknown"),
-                        project=pair.get("dexId", "Unknown"),
-                        name=pair.get("baseToken", {}).get("name", "Unknown"),
-                        market_cap=float(pair.get("fdv", 0)),
-                        growth_potential=f"{change_24h:.2f}%",
-                        pool_id=pair.get("pairAddress", f"unknown_{len(entries)}"),
-                    )
+            entries.append(
+                MemeEntry(
+                    chain=chain,
+                    symbol=pair.get("baseToken", {}).get("symbol", "Unknown"),
+                    price_usd=(f"${float(pair.get('priceUsd', 0)):.4f}" if float(pair.get("priceUsd", 0)) < 1 else f"${float(pair.get('priceUsd', 0)):.2f}"),
+                    liquidity_usd=f"${liquidity:,.0f}",
+                    volume_24h_usd=f"${volume_24h:,.0f}",
+                    change_24h_pct=f"{change_24h:.2f}%",
+                    risk="High" if abs(change_24h) > 20 else "Medium",
+                    url=url,
+                    contract_address=pair.get("baseToken", {}).get("address", "unknown"),
+                    project=pair.get("dexId", "Unknown"),
+                    name=pair.get("baseToken", {}).get("name", "Unknown"),
+                    market_cap=float(pair.get("fdv", 0)),
+                    growth_potential=f"{change_24h:.2f}%",
+                    pool_id=pair.get("pairAddress", f"unknown_{len(entries)}"),
                 )
+            )
     return entries
 
 # ---------------------------------
-# Save to DB
+# Save Results with Upsert
 # ---------------------------------
 def save_results_to_db(entries: List[YieldEntry]):
     for entry in entries:
-        db.save_opportunities([{
-            'id': str(uuid.uuid4()),
-            'project': entry.project,
-            'symbol': entry.symbol,
-            'chain': entry.chain,
-            'apy': entry.apy,
-            'tvl': entry.tvl,
-            'risk': entry.risk,
-            'type': entry.type,
-            'contract_address': entry.contract_address
-        }])
+        # Check if opportunity exists
+        existing = [o for o in db.get_opportunities(chain=entry.chain) if o["contract_address"] == entry.contract_address]
+        if existing:
+            logging.info(f"Updating opportunity: {entry.project} ({entry.contract_address})")
+            db.save_opportunities([{
+                "id": existing[0]["id"],
+                "project": entry.project,
+                "symbol": entry.symbol,
+                "chain": entry.chain,
+                "apy": entry.apy,
+                "tvl": entry.tvl,
+                "risk": entry.risk,
+                "type": entry.type,
+                "contract_address": entry.contract_address
+            }])
+        else:
+            logging.info(f"Inserting new opportunity: {entry.project} ({entry.contract_address})")
+            db.save_opportunities([{
+                "id": None,
+                "project": entry.project,
+                "symbol": entry.symbol,
+                "chain": entry.chain,
+                "apy": entry.apy,
+                "tvl": entry.tvl,
+                "risk": entry.risk,
+                "type": entry.type,
+                "contract_address": entry.contract_address
+            }])
 
 # ---------------------------------
-# Main Scan Function
+# Main Scan Loop
 # ---------------------------------
 async def full_defi_scan():
     yields, memes = await asyncio.gather(fetch_yields(), fetch_meme_coins())
@@ -241,46 +225,31 @@ async def full_defi_scan():
 async def countdown(seconds: int):
     for remaining in range(seconds, 0, -1):
         mins, secs = divmod(remaining, 60)
-        print(f"\r⏳ Rescanning in {mins:02d}:{secs:02d}", end="", flush=True)
+        print(f"\r⏳ Next scan in {mins:02d}:{secs:02d}", end="", flush=True)
         await asyncio.sleep(1)
-    print("\r✅ Rescanning now...          ")
+    print("\r✅ Starting scan now...          ")
 
 async def main_loop():
     while True:
         start = time.time()
         results = await full_defi_scan()
+        logging.info(f"Scan completed in {time.time() - start:.2f}s")
         print(f"\nScan complete in {time.time() - start:.2f}s")
 
-        with open("defi_scan_results.json", "w") as f:
-            json.dump(results, f, indent=2)
-
+        # Save results
         if results["yields"]:
             save_results_to_db([YieldEntry(**y) for y in results["yields"]])
         if results["memes"]:
             db.save_meme_opportunities(results["memes"])
 
+        # Write to JSON file
+        with open("defi_scan_results.json", "w") as f:
+            json.dump(results, f, indent=2)
+
         await countdown(RESCAN_INTERVAL)
 
 # ---------------------------------
-# Exported Functions for Streamlit Pages
+# Entry Point
 # ---------------------------------
-def get_top_picks(limit: int = 10):
-    opps = db.get_opportunities(limit=limit)
-    return sorted(opps, key=lambda o: (o["apy"], o["tvl"]), reverse=True)
-
-def get_short_term_opportunities(limit: int = 5):
-    opps = db.get_opportunities(limit=50)
-    return sorted(opps, key=lambda o: o["apy"], reverse=True)[:limit]
-
-def get_layer2_opportunities(limit: int = 10):
-    L2_CHAINS = {"optimism", "arbitrum", "base", "zksync", "polygon"}
-    opps = db.get_opportunities(limit=100)
-    return [o for o in opps if o["chain"].lower() in L2_CHAINS][:limit]
-
-def get_long_term_opportunities(limit: int = 10):
-    opps = db.get_opportunities(limit=100)
-    safe = [o for o in opps if o["tvl"] > 5_000_000 and o["apy"] < 20]
-    return sorted(safe, key=lambda o: o["tvl"], reverse=True)[:limit]
-
 if __name__ == "__main__":
     asyncio.run(main_loop())

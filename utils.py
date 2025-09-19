@@ -2,9 +2,11 @@ import os
 from typing import Optional, Dict, Any, List
 import asyncio
 from web3 import Web3
+import db
 from reportlab.lib.units import inch
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+from defi_scanner import fetch_yields, YieldEntry
 
 def connect_to_chain(chain: str) -> Optional[Web3]:
     rpc_urls = {
@@ -52,3 +54,76 @@ def generate_pdf(scan_results: Dict[str, Any], filename: str = "defi_report.pdf"
                 y_pos = height - inch
         y_pos -= 0.2 * inch
     c.save()
+
+
+# Helper to run async fetch safely
+def run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result()
+        else:
+            return loop.run_until_complete(coro)
+    except Exception:
+        return []
+
+
+def get_top_picks(limit: int = 10) -> List[YieldEntry]:
+    try:
+        entries = run_async(fetch_yields())
+        if entries:
+            sorted_entries = sorted(entries, key=lambda e: (e.apy, e.tvl), reverse=True)
+            return sorted_entries[:limit]
+    except Exception:
+        pass
+
+    # Fallback to DB
+    opps = db.get_opportunities(limit=limit)
+    sorted_opps = sorted(opps, key=lambda o: (o["apy"], o["tvl"]), reverse=True)
+    return [YieldEntry(**o) for o in sorted_opps[:limit]]
+
+
+def get_short_term_opportunities(limit: int = 5) -> List[YieldEntry]:
+    try:
+        entries = run_async(fetch_yields())
+        if entries:
+            sorted_entries = sorted(entries, key=lambda e: e.apy, reverse=True)
+            return sorted_entries[:limit]
+    except Exception:
+        pass
+
+    opps = db.get_opportunities(limit=50)
+    sorted_opps = sorted(opps, key=lambda o: o["apy"], reverse=True)
+    return [YieldEntry(**o) for o in sorted_opps[:limit]]
+
+
+def get_layer2_opportunities(limit: int = 10) -> List[YieldEntry]:
+    L2_CHAINS = {"optimism", "arbitrum", "base", "zksync", "polygon"}
+    try:
+        entries = run_async(fetch_yields())
+        l2_entries = [e for e in entries if e.chain.lower() in L2_CHAINS]
+        if l2_entries:
+            return l2_entries[:limit]
+    except Exception:
+        pass
+
+    opps = db.get_opportunities(limit=100)
+    l2_opps = [o for o in opps if o["chain"].lower() in L2_CHAINS]
+    return [YieldEntry(**o) for o in l2_opps[:limit]]
+
+
+def get_long_term_opportunities(limit: int = 10) -> List[YieldEntry]:
+    try:
+        entries = run_async(fetch_yields())
+        safe_entries = [e for e in entries if e.tvl > 5_000_000 and e.apy < 20]
+        if safe_entries:
+            sorted_entries = sorted(safe_entries, key=lambda e: e.tvl, reverse=True)
+            return sorted_entries[:limit]
+    except Exception:
+        pass
+
+    opps = db.get_opportunities(limit=100)
+    safe_opps = [o for o in opps if o["tvl"] > 5_000_000 and o["apy"] < 20]
+    sorted_opps = sorted(safe_opps, key=lambda o: o["tvl"], reverse=True)
+    return [YieldEntry(**o) for o in sorted_opps[:limit]]
