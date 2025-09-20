@@ -17,6 +17,14 @@ from wallet_utils import (
 from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
 
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    filename="logs/meme_coins.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---

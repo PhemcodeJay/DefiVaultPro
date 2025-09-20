@@ -11,7 +11,14 @@ from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS
 from utils import get_layer2_opportunities
 from streamlit_javascript import st_javascript
 
-# --- Logging ---
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    filename="logs/layer2_focus.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---

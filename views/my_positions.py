@@ -17,6 +17,17 @@ from wallet_utils import (
 )
 from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
+import logging
+
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    filename="logs/my_positions.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
+logger = logging.getLogger(__name__)
 
 # --- Async Helpers ---
 async def async_get_current_token_price(token_symbol: str, chain: str) -> float:

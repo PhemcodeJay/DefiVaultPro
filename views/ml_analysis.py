@@ -6,9 +6,15 @@ from wallet_utils import init_wallets
 from utils import safe_get, format_number
 from streamlit_javascript import st_javascript
 
-# --- Logging ---
+# --- Logging ---# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    filename="logs/ml_analysis.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
 logger = logging.getLogger(__name__)
-
 # --- Post message helper for JS interactions ---
 def get_post_message():
     return st_javascript("return window.lastMessage || {}")
