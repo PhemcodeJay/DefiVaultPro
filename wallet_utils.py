@@ -13,6 +13,9 @@ from hexbytes import HexBytes
 from utils import connect_to_chain
 import time
 import config
+from eth_abi.abi import encode_abi
+from eth_utils.abi import function_signature_to_4byte_selector
+
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -203,6 +206,35 @@ def build_compound_withdraw_tx_data(chain: str, pool_address: str, token_address
     }
     tx_params['gas'] = int(func.estimate_gas(tx_params) * 1.2)
     return func.build_transaction(tx_params)
+
+
+def build_uniswap_swap_tx_data(chain, token_in, token_out, amount_in, amount_out_min, wallet_address, deadline=1800):
+    """
+    Builds calldata for Uniswap V2 `swapExactTokensForTokens` function.
+    Assumes ERC20 approval is already handled.
+    """
+    # Function signature
+    selector = function_signature_to_4byte_selector(
+        "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)"
+    )
+
+    # Swap path
+    path = [token_in, token_out]
+
+    # Encode parameters
+    data = encode_abi(
+        ["uint256", "uint256", "address[]", "address", "uint256"],
+        [
+            int(amount_in * 1e18),   # amountIn (converted to wei)
+            int(amount_out_min * 1e18),  # minOut
+            path,
+            wallet_address,
+            int(time.time()) + deadline
+        ]
+    )
+
+    return selector.hex() + data.hex()
+
 
 # ---------- Confirm Transactions ----------
 def confirm_tx(chain: str, tx_hash: str) -> bool:
