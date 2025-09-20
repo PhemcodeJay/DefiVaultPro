@@ -8,9 +8,9 @@ from wallet_utils import (
     build_erc20_approve_tx_data, build_aave_supply_tx_data,
     build_compound_supply_tx_data, confirm_tx
 )
-from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
-from utils import get_short_term_opportunities
+from config import NETWORK_LOGOS, PROTOCOL_LOGOS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
+import db
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -21,7 +21,6 @@ logging.basicConfig(
     encoding="utf-8"
 )
 logger = logging.getLogger(__name__)
-
 
 # --- Utility Functions ---
 def safe_get(obj, key, default):
@@ -56,115 +55,124 @@ def render_grid_cards(opps_list, category_name: str):
         st.warning(f"No {category_name} opportunities found.")
         return
 
-    st.markdown("<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>", unsafe_allow_html=True)
+    # Pagination
+    items_per_page = 10
+    total_pages = (len(opps_list) + items_per_page - 1) // items_per_page
+    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="page_short_term")
+    start_idx = (current_page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    paginated_opps = opps_list[start_idx:end_idx]
 
-    for i, opp in enumerate(opps_list):
+    st.markdown(
+        """
+        <style>
+            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .text-green-400 { color: #10B981; }
+            .text-yellow-400 { color: #F59E0B; }
+            .text-red-400 { color: #EF4444; }
+        </style>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    for i, opp in enumerate(paginated_opps):
         pool_id = safe_get(opp, "pool_id", f"unknown_{i}")
         card_key = f"{category_name}_{pool_id}"
         expanded = st.session_state.expanded_cards.get(card_key, False)
 
-        chain = safe_get(opp, "chain", "Unknown").capitalize()
+        chain = safe_get(opp, "chain", "unknown").capitalize()
         project = safe_get(opp, "project", "Unknown")
         symbol = safe_get(opp, "symbol", "Unknown")
-        apy_str = safe_get(opp, "apy_str", "0%")
+        apy = safe_get(opp, "apy", 0.0)
+        apy_str = f"{apy:.2f}%" if apy else "0%"
         tvl_str = format_number(safe_get(opp, "tvl", 0))
         risk = safe_get(opp, "risk", "Unknown")
         type_ = safe_get(opp, "type", "Unknown")
         contract_address = safe_get(opp, "contract_address", "0x0")
         link = safe_get(opp, "link", "#")
 
-        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/12")
-        protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/12")
+        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
+        protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/32?text=Protocol")
         explorer_url = explorer_urls.get(chain.lower(), "#") + contract_address
 
-        st.markdown(f"""
-            <div style='padding:1rem;background:#1e1e2f;border-radius:12px;cursor:pointer;' onclick="document.getElementById('{card_key}').click()">
+        st.markdown(
+            f"""
+            <div class="card" onclick="document.getElementById('{card_key}').click()">
                 <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
                     <div style='display:flex;align-items:center;'>
-                        <img src="{protocol_logo}" width="16" height="16" style="margin-right:0.5rem;">
-                        <b style='color:#dbeafe'>{symbol}</b>
+                        <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
+                        <h3 style='margin:0;font-size:1.1rem;'>{project}</h3>
                     </div>
-                    <span style='color:#fff'>{risk}</span>
+                    <img src="{protocol_logo}" alt="{project}" style="width:24px;height:24px;border-radius:50%;">
                 </div>
-                <div style='display:flex;align-items:center;margin-bottom:0.5rem;'>
-                    <img src="{logo_url}" width="12" height="12" style="margin-right:0.25rem;">
-                    <span style='color:#aaa;font-size:12px'>{chain}</span>
-                </div>
-                <div style='display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;font-size:12px;'>
-                    <div>APY: <b>{apy_str}</b></div>
-                    <div>TVL: <b>{tvl_str}</b></div>
-                    <div>Type: <b>{type_}</b></div>
-                </div>
+                <p style='margin:0.2rem 0;'><strong>Chain:</strong> {chain} | <strong>Symbol:</strong> {symbol}</p>
+                <p style='margin:0.2rem 0;'><strong>APY:</strong> <span class="text-green-400">{apy_str}</span></p>
+                <p style='margin:0.2rem 0;'><strong>TVL:</strong> {tvl_str}</p>
+                <p style='margin:0.2rem 0;'><strong>Risk:</strong> {risk}</p>
+                <a href="{link}" target="_blank" style='color:#6366f1;text-decoration:none;'>View on DeFiLlama ↗</a>
+                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;margin-left:1rem;'>Explorer ↗</a>
             </div>
-        """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True
+        )
 
-        expanded = st.checkbox("Expand", value=expanded, key=f"{card_key}_checkbox", label_visibility="collapsed")
-        st.session_state.expanded_cards[card_key] = expanded
+        # Invisible checkbox to toggle expansion
+        if st.checkbox("Expand", key=card_key, value=expanded):
+            st.session_state.expanded_cards[card_key] = True
+            connected_wallet = get_connected_wallet(st.session_state)
+            if connected_wallet:
+                selected_token = st.selectbox("Select Token", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
+                amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")
+                if st.button("Invest Now", key=f"invest_{card_key}"):
+                    try:
+                        protocol = project.lower()
+                        chain_id = CHAIN_IDS.get(chain.lower(), 1)
+                        pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower(), "0x0")
+                        token_address = ERC20_TOKENS.get(selected_token, {}).get(chain.lower(), "0x0")
+                        if not pool_address or not token_address:
+                            st.error("Invalid pool or token address")
+                            continue
 
-        if expanded:
-            with st.expander("", expanded=True):
-                st.markdown(f"""
-                    <div style='padding:0.5rem;background:#111; border-radius:8px;color:#ccc;font-size:12px;'>
-                        Protocol: {project}<br>
-                        Contract: <a href="{explorer_url}" target="_blank">{contract_address[:6]}...{contract_address[-4:]}</a><br>
-                        Details: <a href="{link}" target="_blank">View on Protocol</a>
-                    </div>
-                """, unsafe_allow_html=True)
+                        approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
+                        approve_tx['chainId'] = chain_id
+                        st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                        time.sleep(1)
+                        approve_resp = get_post_message()
+                        if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
+                            st.success("Approve confirmed!")
+                        else:
+                            st.error("Approve failed")
+                            continue
 
-                # --- MetaMask Investment ---
-                connected_wallet = get_connected_wallet(st.session_state, chain.lower())
-                if connected_wallet and connected_wallet.verified and connected_wallet.address:
-                    token_options = list(ERC20_TOKENS.get(chain.lower(), {}).keys()) + [BALANCE_SYMBOLS.get(chain.lower(), "Native")]
-                    selected_token = st.selectbox("Select Token", token_options, key=f"token_{i}")
-                    token_address = ERC20_TOKENS.get(chain.lower(), {}).get(selected_token, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
-                    amount = st.number_input("Amount to Invest", min_value=0.0, value=1.0, step=0.01, key=f"amount_{i}")
-                    pool_address = CONTRACT_MAP.get(project.lower(), {}).get(chain.lower(), "")
-                    chain_id = CHAIN_IDS.get(chain.lower(), 0)
+                        if 'aave' in protocol:
+                            supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
+                        elif 'compound' in protocol:
+                            supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
+                        else:
+                            st.error(f"Unsupported protocol: {protocol}")
+                            continue
 
-                    if amount > 0 and st.button("💸 Invest with MetaMask", key=f"invest_{i}"):
-                        try:
-                            protocol = project.lower()
-                            # Approve
-                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
-                            approve_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)  # type: ignore
-                            time.sleep(1)
-                            response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                                if confirm_tx(chain.lower(), response['txHash']):
-                                    st.success("Approve transaction confirmed!")
-                                else:
-                                    st.error("Approve transaction failed")
-                                    continue
-                            else:
-                                st.error("Approve transaction failed")
-                                continue
-
-                            # Supply
-                            if 'aave' in protocol:
-                                supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
-                            elif 'compound' in protocol:
-                                supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
-                            else:
-                                st.error(f"Unsupported protocol: {protocol}")
-                                continue
-
-                            supply_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)  # type: ignore
-                            time.sleep(1)
-                            response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                                if confirm_tx(chain.lower(), response['txHash']):
-                                    position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
-                                    add_position_to_session(st.session_state, position)
-                                    st.success(f"Invested {amount} {selected_token} in {project}!")
-                                else:
-                                    st.error("Supply transaction failed")
+                        supply_tx['chainId'] = chain_id
+                        st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
+                        time.sleep(1)
+                        response = get_post_message()
+                        if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                            if confirm_tx(chain.lower(), response['txHash']):
+                                position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
+                                add_position_to_session(st.session_state, position)
+                                st.success(f"Invested {amount} {selected_token} in {project}!")
                             else:
                                 st.error("Supply transaction failed")
-                        except Exception as e:
-                            st.error(f"Investment failed: {str(e)}")
-                        st.rerun()
+                        else:
+                            st.error("Supply transaction failed")
+                    except Exception as e:
+                        st.error(f"Investment failed: {str(e)}")
+                    st.rerun()
+            else:
+                st.warning("Connect wallet to invest.")
+        else:
+            st.session_state.expanded_cards[card_key] = False
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -174,18 +182,20 @@ def render():
     st.write("High-yield DeFi opportunities for short-term gains.")
 
     # Initialize wallets
-    if "wallets" not in st.session_state:
+    if 'wallets' not in st.session_state:
         init_wallets(st.session_state)
 
-    # Fetch short-term opportunities
+    # Fetch short-term opportunities from DB (e.g., high APY filter)
     @st.cache_data(ttl=300)
     def cached_short_term():
-        return get_short_term_opportunities()  # already synchronous
+        # Assuming db.get_opportunities returns all; filter for high APY (e.g., >20%) for short-term
+        all_opps = db.get_opportunities(limit=100)
+        return [opp for opp in all_opps if opp.get('apy', 0) > 20]  # Example filter for short-term (high APY)
 
     with st.spinner("🔍 Scanning for short-term DeFi opportunities..."):
         short_term_opps = cached_short_term()
         if not short_term_opps:
-            st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
+            st.error("No short-term opportunities found. Please check the database or run `python defi_scanner.py`.")
         else:
             render_grid_cards(short_term_opps, "short_term")
 

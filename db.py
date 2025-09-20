@@ -4,7 +4,6 @@ from datetime import datetime
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 
-from web3 import Web3
 from sqlalchemy import (
     BigInteger,
     Column,
@@ -18,7 +17,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Mapped, mapped_column
-from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
@@ -200,11 +199,19 @@ def parse_float(value: Any) -> float:
 
 def validate_opportunity_data(data: Dict[str, Any]) -> bool:
     required = ['project', 'symbol', 'chain', 'contract_address', 'apy', 'tvl', 'risk']
-    return all(data.get(f) not in (None, "", " ") for f in required)
+    missing = [f for f in required if data.get(f) in (None, "", " ")]
+    if missing:
+        logger.info(f"Skipping opportunity {data.get('project', 'unknown')}: missing/invalid fields {missing}")
+        return False
+    return True
 
 def validate_meme_opportunity_data(data: Dict[str, Any]) -> bool:
     required = ['project', 'name', 'symbol', 'chain', 'contract_address', 'price', 'market_cap', 'risk']
-    return all(data.get(f) not in (None, "", " ") for f in required)
+    missing = [f for f in required if data.get(f) in (None, "", " ")]
+    if missing:
+        logger.info(f"Skipping meme opportunity {data.get('project', 'unknown')}: missing/invalid fields {missing}")
+        return False
+    return True
 
 # ----------------------------- Save Functions -----------------------------
 def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
@@ -239,6 +246,7 @@ def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
                         setattr(existing, k, v)
                 else:
                     session.add(Opportunity(**opp_dict))
+                session.flush()  # Flush to make changes visible within the session
         return True
     except Exception as e:
         logger.error(f"Failed to save opportunities: {e}")
@@ -278,6 +286,7 @@ def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
                         setattr(existing, k, v)
                 else:
                     session.add(MemeOpportunity(**meme_dict))
+                session.flush()  # Flush to make changes visible within the session
         return True
     except Exception as e:
         logger.error(f"Failed to save meme opportunities: {e}")
@@ -306,6 +315,124 @@ def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List
             return [m.__dict__ for m in memes]
     except Exception as e:
         logger.error(f"Failed to get meme opportunities: {e}")
+        return []
+
+# ----------------------------- Wallet Helpers -----------------------------
+def save_wallet(wallet_id: str, chain: str, address: str,
+                connected: bool, verified: bool, balance: float, nonce: Optional[int]) -> bool:
+    try:
+        with get_db_session() as session:
+            wallet = session.query(Wallet).filter_by(id=wallet_id).first()
+            if wallet:
+                wallet.chain = chain
+                wallet.address = address
+                wallet.connected = connected
+                wallet.verified = verified
+                wallet.balance = balance
+                wallet.nonce = nonce
+            else:
+                wallet = Wallet(
+                    id=wallet_id,
+                    chain=chain,
+                    address=address,
+                    connected=connected,
+                    verified=verified,
+                    balance=balance,
+                    nonce=nonce
+                )
+                session.add(wallet)
+            session.flush()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save wallet {wallet_id}: {e}")
+        return False
+
+def disconnect_wallet(wallet_id: str) -> bool:
+    try:
+        with get_db_session() as session:
+            wallet = session.query(Wallet).filter_by(id=wallet_id).first()
+            if wallet:
+                wallet.connected = False
+                wallet.verified = False
+                session.flush()
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to disconnect wallet {wallet_id}: {e}")
+        return False
+
+def get_wallets() -> List[Dict[str, Any]]:
+    try:
+        with get_db_session() as session:
+            wallets = session.query(Wallet).all()
+            return [w.__dict__ for w in wallets]
+    except Exception as e:
+        logger.error(f"Failed to get wallets: {e}")
+        return []
+
+# ----------------------------- Position Helpers -----------------------------
+def save_position(position_id: str, chain: str, wallet_address: str,
+                  opportunity_name: str, token_symbol: str,
+                  amount_invested: float, tx_hash: str,
+                  protocol: Optional[str] = None, apy: Optional[float] = None) -> bool:
+    try:
+        with get_db_session() as session:
+            position = session.query(Position).filter_by(id=position_id).first()
+            if position:
+                # update if exists
+                position.chain = chain
+                position.wallet_address = wallet_address
+                position.opportunity_name = opportunity_name
+                position.token_symbol = token_symbol
+                position.amount_invested = amount_invested
+                position.tx_hash = tx_hash
+                position.protocol = protocol
+                position.apy = apy
+            else:
+                # create new
+                position = Position(
+                    id=position_id,
+                    chain=chain,
+                    wallet_address=wallet_address,
+                    opportunity_name=opportunity_name,
+                    token_symbol=token_symbol,
+                    amount_invested=amount_invested,
+                    current_value=amount_invested,
+                    tx_hash=tx_hash,
+                    protocol=protocol,
+                    apy=apy,
+                    status="pending"
+                )
+                session.add(position)
+            session.flush()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save position {position_id}: {e}")
+        return False
+
+def close_position(position_id: str, tx_hash: Optional[str] = None) -> bool:
+    try:
+        with get_db_session() as session:
+            position = session.query(Position).filter_by(id=position_id).first()
+            if position and position.status == "active": # type: ignore
+                position.status = "closed"
+                position.exit_date = datetime.utcnow()
+                if tx_hash:
+                    position.tx_hash = tx_hash
+                session.flush()
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"Failed to close position {position_id}: {e}")
+        return False
+
+def get_positions(limit: int = 50) -> List[Dict[str, Any]]:
+    try:
+        with get_db_session() as session:
+            positions = session.query(Position).order_by(Position.entry_date.desc()).limit(limit).all()
+            return [p.__dict__ for p in positions]
+    except Exception as e:
+        logger.error(f"Failed to get positions: {e}")
         return []
 
 # ----------------------------- Init -----------------------------

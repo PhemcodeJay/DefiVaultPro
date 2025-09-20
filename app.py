@@ -1,20 +1,12 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import os
-from dotenv import load_dotenv
-import db
-import wallet_utils
 import logging
 import importlib
-import asyncio
-import inspect
 import subprocess
 import sys
 import atexit
-import signal  # Fixed: signal was missing
-
-# --- Load Environment Variables ---
-load_dotenv()
+import signal
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -33,16 +25,7 @@ try:
     logger.info("Started defi_scanner.py successfully.")
 except Exception as e:
     logger.error(f"Failed to start defi_scanner.py: {e}")
-
-# --- Initialize Database ---
-if db.test_connection():
-    logger.info("Database connection successful.")
-    if db.init_database():
-        st.success("Database initialized successfully.")
-    else:
-        st.warning("Database initialization failed or tables already exist.")
-else:
-    st.error("Database connection failed. Some features may not work.")
+    st.error(f"Failed to start DeFi scanner: {str(e)}")
 
 # --- Page Config ---
 st.set_page_config(
@@ -99,31 +82,20 @@ st.markdown("""
 
 # --- Initialize Session State ---
 if 'selected_page' not in st.session_state:
-    st.session_state.selected_page = "🏆 Top Picks"
-if 'wallets' not in st.session_state:
-    wallet_utils.init_wallets(st.session_state)
-if 'positions' not in st.session_state:
-    st.session_state.positions = db.get_positions()
+    st.session_state.selected_page = "Dashboard"
 
-# --- Sidebar Navigation & Page Loader ---
+# --- Sidebar Navigation ---
 PAGE_MODULES = {
-    "🏆 Top Picks": "views.top_picks",
-    "⚡ Short Term": "views.short_term",
-    "🚀 Layer 2 Focus": "views.layer2_focus",
-    "🏦 Long Term": "views.long_term",
-    "🤖 ML Analysis": "views.ml_analysis", 
-    "🐸 Meme Coins": "views.meme_coins",
-    "📊 My Positions": "views.my_positions",
-    "👛 Wallets": "views.wallets"
+    "🌟 Dashboard": "views.dashboard"
 }
 
 st.sidebar.markdown("<h3 style='color:#6366f1;'>Navigation</h3>", unsafe_allow_html=True)
 for page_name in PAGE_MODULES.keys():
     if st.sidebar.button(page_name, key=page_name):
         st.session_state.selected_page = page_name
-        st.rerun()  # Proper rerun for Streamlit
+        st.rerun()
 
-# --- Load the selected page with proper async handling ---
+# --- Load the selected page ---
 def load_page(selected_page: str):
     module_name = PAGE_MODULES.get(selected_page)
     if not module_name:
@@ -138,21 +110,10 @@ def load_page(selected_page: str):
             st.warning(f"Module {selected_page} loaded but no render() found.")
             return
 
-        if inspect.iscoroutinefunction(render_func):
-            # Run coroutine safely without blocking Streamlit
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(render_func())
-                else:
-                    asyncio.run(render_func())
-            except RuntimeError as e:
-                logger.error(f"Async execution error: {e}")
-                st.error(f"Failed to load async page: {selected_page}")
-        else:
-            render_func()
+        render_func()
 
     except ImportError as e:
+        logger.error(f"Failed to load page: {selected_page}. Error: {str(e)}")
         st.error(f"Failed to load page: {selected_page}. Error: {str(e)}")
     except Exception as e:
         logger.exception(f"Error rendering page {selected_page}: {e}")

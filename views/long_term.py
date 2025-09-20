@@ -2,20 +2,14 @@ import streamlit as st
 import time
 import json
 import logging
-from typing import Dict, Any, List
-from utils import get_long_term_opportunities
 from wallet_utils import (
-    init_wallets,
-    get_connected_wallet,
-    create_position,
-    add_position_to_session,
-    build_erc20_approve_tx_data,
-    build_aave_supply_tx_data,
-    build_compound_supply_tx_data,
-    confirm_tx,
+    init_wallets, get_connected_wallet, add_position_to_session,
+    create_position, build_erc20_approve_tx_data, build_aave_supply_tx_data,
+    build_compound_supply_tx_data, confirm_tx
 )
-from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
+from config import NETWORK_LOGOS, PROTOCOL_LOGOS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
+import db
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -45,19 +39,19 @@ def format_number(value: float) -> str:
         elif value >= 1_000:
             return f"${value / 1_000:.2f}K"
         return f"${value:,.2f}"
-    except:
+    except Exception:
         return str(value)
 
-def get_post_message() -> Dict[str, Any]:
+def get_post_message():
     return st_javascript("return window.lastMessage || {}")
 
 # --- Render Grid Cards ---
-def render_grid_cards(opps_list: List[Dict[str, Any]], category_name: str):
+def render_grid_cards(opps_list, category_name: str):
     if "expanded_cards" not in st.session_state:
         st.session_state.expanded_cards = {}
 
     if not opps_list:
-        st.warning(f"No {category_name.replace('_', ' ').title()} opportunities found.")
+        st.warning(f"No {category_name} opportunities found.")
         return
 
     # Pagination
@@ -82,14 +76,15 @@ def render_grid_cards(opps_list: List[Dict[str, Any]], category_name: str):
     )
 
     for i, opp in enumerate(paginated_opps):
-        pool_id = safe_get(opp, "id", safe_get(opp, "pool_id", f"unknown_{i}"))
+        pool_id = safe_get(opp, "id", f"unknown_{i}")
         card_key = f"{category_name}_{pool_id}"
         expanded = st.session_state.expanded_cards.get(card_key, False)
 
         chain = safe_get(opp, "chain", "unknown").capitalize()
-        project = safe_get(opp, "project", safe_get(opp, "symbol", "Unknown"))
+        project = safe_get(opp, "project", "Unknown")
         symbol = safe_get(opp, "symbol", "Unknown")
-        apy_str = safe_get(opp, "apy_str", "0%")
+        apy = safe_get(opp, "apy", 0.0)
+        apy_str = f"{apy:.2f}%" if apy else "0%"
         tvl_str = format_number(safe_get(opp, "tvl", 0))
         risk = safe_get(opp, "risk", "Unknown")
         type_ = safe_get(opp, "type", "Unknown")
@@ -106,89 +101,76 @@ def render_grid_cards(opps_list: List[Dict[str, Any]], category_name: str):
                 <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
                     <div style='display:flex;align-items:center;'>
                         <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
-                        <h3 style='margin:0;font-size:1rem;font-weight:600;color:#c7d2fe;'>{project}</h3>
+                        <h3 style='margin:0;font-size:1.1rem;'>{project}</h3>
                     </div>
                     <img src="{protocol_logo}" alt="{project}" style="width:24px;height:24px;border-radius:50%;">
                 </div>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    Chain: {chain} | Symbol: {symbol}
-                </p>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    Type: {type_}
-                </p>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    APY: <span class="text-green-400">{apy_str}</span> | TVL: {tvl_str}
-                </p>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    Risk: <span class="{'text-green-400' if risk=='Low' else 'text-yellow-400' if risk=='Medium' else 'text-red-400'}">{risk}</span>
-                </p>
-                <a href="{link}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;'>
-                    View Opportunity ↗
-                </a>
-                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;margin-left:1rem;'>
-                    Explore Contract ↗
-                </a>
+                <p style='margin:0.2rem 0;'><strong>Chain:</strong> {chain} | <strong>Symbol:</strong> {symbol}</p>
+                <p style='margin:0.2rem 0;'><strong>APY:</strong> <span class="text-green-400">{apy_str}</span></p>
+                <p style='margin:0.2rem 0;'><strong>TVL:</strong> {tvl_str}</p>
+                <p style='margin:0.2rem 0;'><strong>Risk:</strong> {risk}</p>
+                <a href="{link}" target="_blank" style='color:#6366f1;text-decoration:none;'>View on DeFiLlama ↗</a>
+                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;margin-left:1rem;'>Explorer ↗</a>
             </div>
             """,
-            unsafe_allow_html=True,
+            unsafe_allow_html=True
         )
 
-        with st.container():
-            st.checkbox("Expand", value=expanded, key=card_key)
-            if expanded:
-                connected_wallet = get_connected_wallet(st.session_state, chain.lower())
-                if not connected_wallet:
-                    st.info(f"Connect wallet for {chain} to invest.")
-                else:
-                    available_tokens = list(ERC20_TOKENS.get(chain.lower(), {}).keys())
-                    selected_token = st.selectbox("Select Token to Invest", available_tokens, key=f"token_{card_key}")
-                    amount = st.number_input("Amount to Invest", min_value=0.0, step=0.1, key=f"amount_{card_key}")
-                    if st.button("Invest", key=f"invest_{card_key}"):
-                        try:
-                            protocol = project.lower()
-                            token_address = ERC20_TOKENS[chain.lower()].get(selected_token)
-                            pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower())
-                            chain_id = CHAIN_IDS.get(chain.lower(), 0)
-                            if not pool_address or not token_address:
-                                st.error("Invalid pool or token address")
-                                continue
+        if st.checkbox("Expand", key=card_key, value=expanded):
+            st.session_state.expanded_cards[card_key] = True
+            connected_wallet = get_connected_wallet(st.session_state)
+            if connected_wallet:
+                selected_token = st.selectbox("Select Token", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
+                amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")
+                if st.button("Invest Now", key=f"invest_{card_key}"):
+                    try:
+                        protocol = project.lower()
+                        chain_id = CHAIN_IDS.get(chain.lower(), 1)
+                        pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower(), "0x0")
+                        token_address = ERC20_TOKENS.get(selected_token, {}).get(chain.lower(), "0x0")
+                        if not pool_address or not token_address:
+                            st.error("Invalid pool or token address")
+                            continue
 
-                            approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address) # type: ignore
-                            approve_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
-                            time.sleep(1)
-                            approve_resp = get_post_message()
-                            if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
-                                st.success("Approve confirmed!")
-                            else:
-                                st.error("Approve failed")
-                                continue
+                        approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
+                        approve_tx['chainId'] = chain_id
+                        st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                        time.sleep(1)
+                        approve_resp = get_post_message()
+                        if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
+                            st.success("Approve confirmed!")
+                        else:
+                            st.error("Approve failed")
+                            continue
 
-                             # Supply
-                            if 'aave' in protocol:
-                                supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address) # type: ignore
-                            elif 'compound' in protocol:
-                                supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address) # type: ignore
-                            else:
-                                st.error(f"Unsupported protocol: {protocol}")
-                                continue
+                        if 'aave' in protocol:
+                            supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
+                        elif 'compound' in protocol:
+                            supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
+                        else:
+                            st.error(f"Unsupported protocol: {protocol}")
+                            continue
 
-                            supply_tx['chainId'] = chain_id
-                            st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
-                            time.sleep(1)
-                            response = get_post_message()
-                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                                if confirm_tx(chain.lower(), response['txHash']):
-                                    position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
-                                    add_position_to_session(st.session_state, position)
-                                    st.success(f"Invested {amount} {selected_token} in {project}!")
-                                else:
-                                    st.error("Supply transaction failed")
+                        supply_tx['chainId'] = chain_id
+                        st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
+                        time.sleep(1)
+                        response = get_post_message()
+                        if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                            if confirm_tx(chain.lower(), response['txHash']):
+                                position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
+                                add_position_to_session(st.session_state, position)
+                                st.success(f"Invested {amount} {selected_token} in {project}!")
                             else:
                                 st.error("Supply transaction failed")
-                        except Exception as e:
-                            st.error(f"Investment failed: {str(e)}")
-                        st.rerun()
+                        else:
+                            st.error("Supply transaction failed")
+                    except Exception as e:
+                        st.error(f"Investment failed: {str(e)}")
+                    st.rerun()
+            else:
+                st.warning("Connect wallet to invest.")
+        else:
+            st.session_state.expanded_cards[card_key] = False
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -198,36 +180,20 @@ def render():
     st.write("Stable DeFi opportunities for long-term investment.")
 
     # Initialize wallets
-    if "wallets" not in st.session_state:
+    if 'wallets' not in st.session_state:
         init_wallets(st.session_state)
 
-    # Fetch long-term opportunities
+    # Fetch long-term opportunities from DB (e.g., low risk, high TVL filter)
     @st.cache_data(ttl=300)
-    def cached_get_long_term_opportunities():
-        try:
-            results = get_long_term_opportunities()
-            serializable = []
-            for r in results:
-                if hasattr(r, "__dict__"):
-                    serializable.append(vars(r))
-                elif isinstance(r, dict):
-                    serializable.append(r)
-                else:
-                    try:
-                        serializable.append(dict)
-                    except Exception:
-                        serializable.append({"value": str(r)})
-            return serializable
-        except Exception as e:
-            logger.error(f"Error fetching long term opportunities: {e}")
-            return []
+    def cached_long_term():
+        # Assuming db.get_opportunities returns all; filter for low risk or high TVL for long-term
+        all_opps = db.get_opportunities(limit=100)
+        return [opp for opp in all_opps if opp.get('risk', 'Unknown') == 'Low' or opp.get('tvl', 0) > 1_000_000]  # Example filter for long-term
 
-    st.subheader("🏛 Stable Opportunities")
-    with st.spinner("🔍 Scanning for long-term opportunities..."):
-        long_term_opps = cached_get_long_term_opportunities()
-        logger.info(f"Fetched {len(long_term_opps)} long-term opportunities for rendering")
+    with st.spinner("🔍 Scanning for long-term DeFi opportunities..."):
+        long_term_opps = cached_long_term()
         if not long_term_opps:
-            st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
+            st.error("No long-term opportunities found. Please check the database or run `python defi_scanner.py`.")
         else:
             render_grid_cards(long_term_opps, "long_term")
 
