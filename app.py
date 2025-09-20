@@ -8,6 +8,9 @@ import sys
 import atexit
 import signal
 
+import db
+import wallet_utils
+
 # --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -158,11 +161,23 @@ st.markdown("""
 # --- Initialize Session State ---
 if 'selected_page' not in st.session_state:
     st.session_state.selected_page = "Dashboard"
+if 'wallets' not in st.session_state:
+    wallet_utils.init_wallets(st.session_state)
+if 'positions' not in st.session_state:
+    st.session_state.positions = db.get_positions()
 
-# --- Sidebar Navigation ---
+# --- Page Mapping ---
 PAGE_MODULES = {
-    "🌟 Dashboard": "views.dashboard"
+    "🌟 Dashboard": "views.dashboard",
+    "🏆 Top Picks": "views.top_picks",
+    "⚡ Short Term": "views.short_term",
+    "🚀 Layer 2 Focus": "views.layer2_focus",
+    "🏦 Long Term": "views.long_term",
+    "🐸 Meme Coins": "views.meme_coins",
+    "📊 My Positions": "views.my_positions",
+    "👛 Wallets": "views.wallets"
 }
+
 
 st.sidebar.markdown("<h3 style='color:#6366f1;'>Navigation</h3>", unsafe_allow_html=True)
 for page_name in PAGE_MODULES.keys():
