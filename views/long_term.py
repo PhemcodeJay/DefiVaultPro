@@ -118,7 +118,11 @@ def render_grid_cards(opps_list, category_name: str):
 
         if st.checkbox("Expand", key=card_key, value=expanded):
             st.session_state.expanded_cards[card_key] = True
-            connected_wallet = get_connected_wallet(st.session_state)
+            connected_wallet = get_connected_wallet(st.session_state, chain.lower())
+            if not connected_wallet or not connected_wallet.address:
+                st.warning("⚠️ Please connect your wallet for this chain before continuing.")
+                return
+
             if connected_wallet:
                 selected_token = st.selectbox("Select Token", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
                 amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")

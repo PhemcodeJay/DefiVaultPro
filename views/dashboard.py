@@ -151,9 +151,24 @@ def render_opportunity_table(opps_list, category_name: str, allow_invest=True):
                                     st.error("Invalid pool or token address")
                                     continue
 
-                                approve_tx = build_erc20_approve_tx_data(opp['chain'].lower(), token_address, pool_address, amount, connected_wallet.address)
+                                # Approve transaction
+                                if not connected_wallet or not connected_wallet.address:
+                                    st.error("No connected wallet. Please connect your wallet first.")
+                                    continue
+
+                                approve_tx = build_erc20_approve_tx_data(
+                                    opp['chain'].lower(),
+                                    token_address,
+                                    pool_address,
+                                    amount,
+                                    str(connected_wallet.address)  # ensure it's always a string
+                                )
                                 approve_tx['chainId'] = chain_id
-                                st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+
+                                st.markdown(
+                                    f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>",
+                                    unsafe_allow_html=True
+                                )
                                 time.sleep(1)
                                 approve_resp = get_post_message()
                                 if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
@@ -162,13 +177,27 @@ def render_opportunity_table(opps_list, category_name: str, allow_invest=True):
                                     st.error("Approve failed")
                                     continue
 
+                                # Supply transaction
                                 if 'aave' in protocol:
-                                    supply_tx = build_aave_supply_tx_data(opp['chain'].lower(), pool_address, token_address, amount, connected_wallet.address)
+                                    supply_tx = build_aave_supply_tx_data(
+                                        opp['chain'].lower(),
+                                        pool_address,
+                                        token_address,
+                                        amount,
+                                        str(connected_wallet.address)
+                                    )
                                 elif 'compound' in protocol:
-                                    supply_tx = build_compound_supply_tx_data(opp['chain'].lower(), pool_address, token_address, amount, connected_wallet.address)
+                                    supply_tx = build_compound_supply_tx_data(
+                                        opp['chain'].lower(),
+                                        pool_address,
+                                        token_address,
+                                        amount,
+                                        str(connected_wallet.address)
+                                    )
                                 else:
                                     st.error(f"Unsupported protocol: {protocol}")
                                     continue
+
 
                                 supply_tx['chainId'] = chain_id
                                 st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
@@ -257,7 +286,14 @@ def render_meme_table(memes_list, category_name: str):
                             st.error("Invalid router or token address")
                             continue
 
-                        approve_tx = build_erc20_approve_tx_data(meme['chain'].lower(), token_address, router_address, amount, connected_wallet.address)
+                        approve_tx = build_erc20_approve_tx_data(
+                            meme['chain'].lower(),
+                            token_address,
+                            router_address,
+                            amount,
+                            str(connected_wallet.address) if connected_wallet and connected_wallet.address else ""
+                        )
+
                         approve_tx['chainId'] = chain_id
                         st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
                         time.sleep(1)
@@ -387,13 +423,30 @@ def render_position_table(positions, data_map, category_name: str):
                             st.error("Invalid pool or token address")
                             continue
 
+                        if not connected_wallet or not connected_wallet.address:
+                            st.error("No connected wallet. Please connect your wallet first.")
+                            continue
+
                         if 'aave' in protocol:
-                            withdraw_tx = build_aave_withdraw_tx_data(pos['chain'].lower(), pool_address, token_address, amount, connected_wallet.address)
+                            withdraw_tx = build_aave_withdraw_tx_data(
+                                pos['chain'].lower(),
+                                pool_address,
+                                token_address,
+                                amount,
+                                str(connected_wallet.address)
+                            )
                         elif 'compound' in protocol:
-                            withdraw_tx = build_compound_withdraw_tx_data(pos['chain'].lower(), pool_address, token_address, amount, connected_wallet.address)
+                            withdraw_tx = build_compound_withdraw_tx_data(
+                                pos['chain'].lower(),
+                                pool_address,
+                                token_address,
+                                amount,
+                                str(connected_wallet.address)
+                            )
                         else:
                             st.error(f"Unsupported protocol: {protocol}")
                             continue
+
 
                         withdraw_tx['chainId'] = chain_id
                         st.markdown(f"<script>performDeFiAction('withdraw',{json.dumps(withdraw_tx)});</script>", unsafe_allow_html=True)
