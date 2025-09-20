@@ -41,7 +41,82 @@ st.markdown(
     # 💰 DeFiVaultPro Dashboard
     **Real-time multi-chain DeFi scanner**  
     Track top yield opportunities, meme coins, and your wallet positions.  
-    Powered by MetaMask & Web3 for secure, fast interactions.
+    Powered by **MetaMask & Web3** for secure, fast interactions.
+    """,
+    unsafe_allow_html=True
+)
+
+# --- Custom CSS Theme ---
+st.markdown(
+    """
+    <style>
+        /* Global font */
+        html, body, [class*="css"] {
+            font-family: 'Inter', sans-serif;
+        }
+
+        /* Backgrounds */
+        .main {
+            background-color: #383c44ff;
+        }
+
+        /* Card styling */
+        .card {
+            background: linear-gradient(145deg, #383c44ff, #2f3239);
+            border-radius: 16px;
+            padding: 1.2rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.5);
+        }
+
+        /* Buttons */
+        .stButton>button {
+            background: #595bf5ff;
+            color: #ffffff;
+            border-radius: 12px;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            font-weight: 600;
+            transition: background 0.3s ease, transform 0.2s ease;
+        }
+        .stButton>button:hover {
+            background: #4346d6;
+            transform: translateY(-2px);
+        }
+
+        /* Inputs */
+        .stNumberInput input, .stTextInput input, .stSelectbox select {
+            background-color: #2d3037;
+            color: #e2e8f0;
+            border-radius: 8px;
+            border: 1px solid #595bf5ff;
+        }
+
+        /* Headings */
+        h1, h2, h3, h4 {
+            color: #e2e8f0;
+            font-weight: 700;
+        }
+
+        /* Links */
+        a {
+            color: #9da6ff;
+            text-decoration: none;
+        }
+        a:hover {
+            color: #ffffff;
+        }
+
+        /* Success / Error messages */
+        .stAlert>div {
+            border-radius: 12px;
+        }
+    </style>
     """,
     unsafe_allow_html=True
 )
