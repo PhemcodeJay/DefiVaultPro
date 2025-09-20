@@ -111,6 +111,7 @@ PAGE_MODULES = {
     "⚡ Short Term": "views.short_term",
     "🚀 Layer 2 Focus": "views.layer2_focus",
     "🏦 Long Term": "views.long_term",
+    "🤖 ML Analysis": "views.ml_analysis", 
     "🐸 Meme Coins": "views.meme_coins",
     "📊 My Positions": "views.my_positions",
     "👛 Wallets": "views.wallets"

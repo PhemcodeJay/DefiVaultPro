@@ -12,6 +12,16 @@ from wallet_utils import (
 from config import NETWORK_LOGOS, BALANCE_SYMBOLS
 from web3 import Web3
 from typing import Optional
+import logging
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    filename="logs/app.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
+logger = logging.getLogger(__name__)
 
 # --- Load Environment Variables ---
 load_dotenv()

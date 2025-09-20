@@ -6,7 +6,7 @@ from typing import List
 import aiohttp
 import db
 import logging
-import config  # New import for centralized config
+import config  # Centralized config
 
 # ---------------------------------
 # Logging setup
@@ -14,7 +14,7 @@ import config  # New import for centralized config
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filename="defi_scanner.log",
+    filename="logs/defi_scanner.log",
     filemode="a",
 )
 
@@ -60,14 +60,14 @@ class MemeEntry:
     pool_id: str
 
 # ---------------------------------
-# Config (from config.py)
+# Config
 # ---------------------------------
 MIN_APY = config.MIN_APY
 MIN_TVL = config.MIN_TVL
 FOCUS_PROTOCOLS = config.FOCUS_PROTOCOLS
 MEME_CHAINS = config.MEME_CHAINS
 RESCAN_INTERVAL = config.RESCAN_INTERVAL
-CHAIN_RISK_SCORES = {"ethereum": 0.5, "bsc": 1.0, "solana": 1.5}  # Example enhancement
+CHAIN_RISK_SCORES = {"ethereum": 0.5, "bsc": 1.0, "solana": 1.5}
 
 # ---------------------------------
 # Utils
@@ -78,13 +78,13 @@ async def async_request(url: str) -> dict:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    resp.raise_for_status()  # Raise on HTTP error
+                    resp.raise_for_status()
                     return await resp.json()
         except aiohttp.ClientError as e:
             logging.error(f"Request to {url} failed (attempt {attempt+1}): {e}")
             if attempt == retries - 1:
                 return {"error": str(e)}
-            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+            await asyncio.sleep(2 ** attempt)
     return {"error": "All retries failed"}
 
 def risk_score(apy: float, tvl: float, project: str, chain: str) -> float:
@@ -92,7 +92,7 @@ def risk_score(apy: float, tvl: float, project: str, chain: str) -> float:
     if apy > 20: score += 1
     if tvl < 1_000_000: score += 1
     if project.lower() not in FOCUS_PROTOCOLS: score += 0.5
-    score += CHAIN_RISK_SCORES.get(chain.lower(), 1.0)  # Enhanced with chain risk
+    score += CHAIN_RISK_SCORES.get(chain.lower(), 1.0)
     return score
 
 async def estimate_gas_fee(chain: str) -> dict:
@@ -102,7 +102,7 @@ async def estimate_gas_fee(chain: str) -> dict:
 # Fetch Yields
 # ---------------------------------
 async def fetch_yields() -> List[YieldEntry]:
-    url = config.YIELDS_API_URL  # From config
+    url = config.YIELDS_API_URL
     data = await async_request(url)
     if "error" in data:
         return []
@@ -186,14 +186,13 @@ async def fetch_meme_coins() -> List[MemeEntry]:
     return entries
 
 # ---------------------------------
-# Save Results with Upsert and Retry
+# Save Results
 # ---------------------------------
 def save_results_to_db(entries: List[YieldEntry]):
     retries = 3
     for entry in entries:
         for attempt in range(retries):
             try:
-                # Check if opportunity exists
                 existing = [o for o in db.get_opportunities(chain=entry.chain) if o["contract_address"] == entry.contract_address]
                 if existing:
                     logging.info(f"Updating opportunity: {entry.project} ({entry.contract_address})")
@@ -221,12 +220,12 @@ def save_results_to_db(entries: List[YieldEntry]):
                         "type": entry.type,
                         "contract_address": entry.contract_address
                     }])
-                break  # Success, exit retry loop
+                break
             except Exception as e:
                 logging.error(f"Database save failed (attempt {attempt+1}): {e}")
                 if attempt == retries - 1:
                     logging.error(f"Failed to save after {retries} attempts: {entry.project}")
-                time.sleep(2 ** attempt)  # Backoff
+                time.sleep(2 ** attempt)
 
 # ---------------------------------
 # Main Scan Loop
@@ -241,13 +240,11 @@ async def main_loop():
         results = await full_defi_scan()
         logging.info(f"Scan completed in {time.time() - start:.2f}s")
 
-        # Save results with retry
         if results["yields"]:
             save_results_to_db([YieldEntry(**y) for y in results["yields"]])
         if results["memes"]:
             db.save_meme_opportunities(results["memes"])
 
-        # Write to JSON file
         with open("defi_scan_results.json", "w") as f:
             json.dump(results, f, indent=2)
 

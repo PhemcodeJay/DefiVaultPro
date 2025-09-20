@@ -12,7 +12,16 @@ from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS
 from utils import get_short_term_opportunities
 from streamlit_javascript import st_javascript
 
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    filename="logs/short_term.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
 logger = logging.getLogger(__name__)
+
 
 # --- Utility Functions ---
 def safe_get(obj, key, default):

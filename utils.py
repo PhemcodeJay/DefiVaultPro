@@ -159,3 +159,32 @@ def confirm_position(chain: str, position_id: str, tx_hash: str) -> bool:
     except Exception as e:
         logging.error(f"Failed to confirm position tx {tx_hash}: {e}")
         return False
+
+# ---------------------------------
+# Utility Functions
+# ---------------------------------
+def safe_get(obj, key, default=None):
+    """
+    Safely get a value from a dict or object.
+    """
+    if hasattr(obj, key):
+        return getattr(obj, key, default)
+    elif isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+def format_number(value: float) -> str:
+    """
+    Format large numbers into human-readable strings (K, M, B).
+    """
+    try:
+        value = float(value)
+        if value >= 1_000_000_000:
+            return f"${value / 1_000_000_000:.2f}B"
+        elif value >= 1_000_000:
+            return f"${value / 1_000_000:.2f}M"
+        elif value >= 1_000:
+            return f"${value / 1_000:.2f}K"
+        return f"${value:,.2f}"
+    except:
+        return str(value)
