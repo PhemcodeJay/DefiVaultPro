@@ -174,6 +174,7 @@ PAGE_MODULES = {
     "🚀 Layer 2 Focus": "views.layer2_focus",
     "🏦 Long Term": "views.long_term",
     "🐸 Meme Coins": "views.meme_coins",
+    "🏦 ML Analysis": "views.ml_analysis",
     "📊 My Positions": "views.my_positions",
     "👛 Wallets": "views.wallets"
 }

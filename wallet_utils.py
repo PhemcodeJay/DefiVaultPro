@@ -13,7 +13,7 @@ from hexbytes import HexBytes
 from utils import connect_to_chain
 import time
 import config
-from eth_abi.abi import encode_abi
+from eth_abi.abi import encode
 from eth_utils.abi import function_signature_to_4byte_selector
 
 
@@ -222,7 +222,7 @@ def build_uniswap_swap_tx_data(chain, token_in, token_out, amount_in, amount_out
     path = [token_in, token_out]
 
     # Encode parameters
-    data = encode_abi(
+    data = encode(
         ["uint256", "uint256", "address[]", "address", "uint256"],
         [
             int(amount_in * 1e18),   # amountIn (converted to wei)
