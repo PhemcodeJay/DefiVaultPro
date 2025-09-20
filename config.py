@@ -3,10 +3,54 @@ import os
 # Centralized configuration for DeFi Dashboard
 
 # defi_scanner.py configurations
-MIN_APY = 5  # Minimum APY threshold for yield opportunities (%)
-MIN_TVL = 100_000  # Minimum TVL threshold for yield opportunities (USD)
-FOCUS_PROTOCOLS = ["aave", "compound", "uniswap", "curve"]  # DeFi protocols to prioritize
-MEME_CHAINS = ["ethereum", "bsc", "solana"]  # Blockchain networks for meme coin scanning
+MIN_APY = 0  # Minimum APY threshold for yield opportunities (%)
+MIN_TVL = 25_000  # Minimum TVL threshold for yield opportunities (USD)
+# DeFi protocols to prioritize (expanded)
+FOCUS_PROTOCOLS = [
+    "aave",
+    "compound",
+    "uniswap",
+    "curve",
+    "sushiswap",
+    "balancer",
+    "yearn",
+    "convex",
+    "beefy",
+    "lido",
+    "rocket pool",
+    "stargate",
+    "trader joe",
+    "gmx",
+    "radiant",
+    "pancakeswap",
+    "camelot",
+    "raydium",
+    "lyra",
+    "abracadabra",
+    "merkl"
+]
+
+# Blockchain networks for meme coin scanning (expanded)
+MEME_CHAINS = [
+    "ethereum",
+    "bsc",
+    "solana",
+    "polygon",
+    "fantom",
+    "arbitrum",
+    "optimism",
+    "base",
+    "avalanche",
+    "cronos",
+    "neon",
+    "aurora",
+    "ton",
+    "pulsechain",
+    "algorand",
+    "worldchain",
+    "sonic"
+]
+
 RESCAN_INTERVAL = 3600  # Rescan interval for data fetching (seconds, 1 hour)
 YIELDS_API_URL = "https://yields.llama.fi/pools"  # DeFiLlama API endpoint for yield data
 MEME_API_URL = "https://api.dexscreener.com/latest/dex/search"  # DexScreener API endpoint for meme coins

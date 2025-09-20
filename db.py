@@ -1,20 +1,20 @@
 import os
 import time
-import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse
 
 from web3 import Web3
 from hexbytes import HexBytes
-from sqlalchemy import create_engine, select
+from sqlalchemy import BigInteger, Column, create_engine, select
 from sqlalchemy.orm import declarative_base, sessionmaker, Mapped, mapped_column
 from sqlalchemy.exc import SQLAlchemyError
+from sqlite3 import OperationalError
+
 from utils import connect_to_chain
 
-# Configure logging
+# ----------------------------- Logging -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     filename="logs/db.log",
@@ -24,26 +24,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Database configuration
-DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///defi_dashboard.db')
-parsed_url = urlparse(DATABASE_URL)
-is_sqlite = parsed_url.scheme == 'sqlite'
+# ----------------------------- Database URLs -----------------------------
+POSTGRES_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:1234@localhost:5432/Defiscanner"
+)
+SQLITE_URL = "sqlite:///defi_dashboard.db"
 
-# SQLAlchemy engine
-if is_sqlite:
-    db_path = parsed_url.path.lstrip('/')
-    if not os.path.exists(db_path):
-        open(db_path, 'a').close()
-        logger.info(f"SQLite DB file created at {db_path}")
-    engine = create_engine(DATABASE_URL, echo=False, connect_args={'check_same_thread': False})
-else:
-    engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+# ----------------------------- Engine -----------------------------
+def get_engine():
+    try:
+        engine = create_engine(POSTGRES_URL)
+        conn = engine.connect()
+        conn.close()
+        logger.info("Connected to PostgreSQL successfully.")
+        return engine
+    except OperationalError:
+        logger.warning("PostgreSQL not available. Falling back to SQLite.")
+        engine = create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
+        return engine
 
+engine = get_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
-# ----------------------- MODELS -----------------------
+# ----------------------------- Models -----------------------------
 class Wallet(Base):
     __tablename__ = "wallets"
 
@@ -70,7 +75,7 @@ class Position(Base):
     current_value: Mapped[float]
     entry_date: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     exit_date: Mapped[Optional[datetime]] = mapped_column(default=None)
-    status: Mapped[str] = mapped_column(default="active")  # active/closed
+    status: Mapped[str] = mapped_column(default="active")
     tx_hash: Mapped[Optional[str]] = mapped_column(default=None)
     protocol: Mapped[Optional[str]] = mapped_column(default=None)
     apy: Mapped[Optional[float]] = mapped_column(default=None)
@@ -81,14 +86,14 @@ class Position(Base):
 class Opportunity(Base):
     __tablename__ = "opportunities"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
     project: Mapped[str]
     symbol: Mapped[str]
     chain: Mapped[str]
     apy: Mapped[float]
     tvl: Mapped[float]
     risk: Mapped[str]
-    type: Mapped[str]
+    type: Mapped[Optional[str]]
     contract_address: Mapped[str]
     last_updated: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     is_active: Mapped[bool] = mapped_column(default=True)
@@ -97,7 +102,7 @@ class Opportunity(Base):
 class MemeOpportunity(Base):
     __tablename__ = "meme_opportunities"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
     project: Mapped[str]
     name: Mapped[str]
     symbol: Mapped[str]
@@ -111,8 +116,7 @@ class MemeOpportunity(Base):
     last_updated: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     is_active: Mapped[bool] = mapped_column(default=True)
 
-
-# ----------------------- DATABASE UTILS -----------------------
+# ----------------------------- Database Utilities -----------------------------
 @contextmanager
 def get_db_session():
     session = SessionLocal()
@@ -127,20 +131,6 @@ def get_db_session():
         session.close()
 
 
-def test_connection(retries: int = 3) -> bool:
-    for attempt in range(retries):
-        try:
-            with get_db_session() as session:
-                session.execute(select(1))
-            return True
-        except Exception as e:
-            logger.error(f"DB connection test failed (attempt {attempt + 1}): {e}")
-            if attempt == retries - 1:
-                return False
-            time.sleep(2 ** attempt)
-    return False
-
-
 def init_database() -> bool:
     try:
         Base.metadata.create_all(bind=engine)
@@ -151,7 +141,17 @@ def init_database() -> bool:
         return False
 
 
-# ----------------------- WALLET FUNCTIONS -----------------------
+# ----------------------------- Helper -----------------------------
+def parse_float(value: Any) -> float:
+    try:
+        if isinstance(value, str):
+            value = value.replace("$", "").replace(",", "").strip()
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+# ----------------------------- Wallet Functions -----------------------------
 def save_wallet(wallet_id: str, chain: str, address: str,
                 connected: bool = False, verified: bool = False,
                 balance: float = 0.0, nonce: Optional[int] = None) -> bool:
@@ -185,43 +185,7 @@ def save_wallet(wallet_id: str, chain: str, address: str,
         return False
 
 
-def get_wallets() -> List[Dict[str, Any]]:
-    try:
-        with get_db_session() as session:
-            wallets = session.query(Wallet).all()
-            return [
-                {
-                    'id': w.id,
-                    'chain': w.chain,
-                    'address': w.address,
-                    'connected': w.connected,
-                    'verified': w.verified,
-                    'balance': w.balance,
-                    'nonce': w.nonce,
-                    'created_at': w.created_at,
-                    'updated_at': w.updated_at
-                } for w in wallets
-            ]
-    except Exception as e:
-        logger.error(f"Failed to get wallets: {e}")
-        return []
-
-
-def disconnect_wallet(wallet_id: str) -> bool:
-    try:
-        with get_db_session() as session:
-            wallet = session.get(Wallet, wallet_id)
-            if wallet:
-                wallet.connected = False
-                wallet.updated_at = datetime.utcnow()
-                return True
-            return False
-    except Exception as e:
-        logger.error(f"Failed to disconnect wallet: {e}")
-        return False
-
-
-# ----------------------- POSITION FUNCTIONS -----------------------
+# ----------------------------- Position Functions -----------------------------
 def save_position(position_id: str, chain: str, wallet_address: str,
                   opportunity_name: str, token_symbol: str,
                   amount_invested: float, tx_hash: str,
@@ -247,141 +211,71 @@ def save_position(position_id: str, chain: str, wallet_address: str,
         return False
 
 
-def close_position(position_id: str, tx_hash: Optional[str] = None) -> bool:
-    try:
-        with get_db_session() as session:
-            position = session.get(Position, position_id)
-            if position:
-                position.status = 'closed'
-                position.exit_date = datetime.utcnow()
-                if tx_hash:
-                    position.tx_hash = tx_hash
-                position.updated_at = datetime.utcnow()
-                return True
-            return False
-    except Exception as e:
-        logger.error(f"Failed to close position: {e}")
-        return False
-
-def confirm_position(chain: str, position_id: str, tx_hash: str) -> bool:
-    try:
-        w3 = connect_to_chain(chain)
-        if not w3:
-            logger.error(f"Failed to connect to chain: {chain}")
-            return False
-
-        receipt = w3.eth.wait_for_transaction_receipt(HexBytes(tx_hash), timeout=300)
-
-        # Access 'status' as dictionary key
-        if receipt["status"] == 1:
-            with get_db_session() as session:
-                position = session.get(Position, position_id)
-                if position:
-                    position.status = 'active'
-                    position.updated_at = datetime.utcnow()
-                    return True
-        return False
-    except Exception as e:
-        logger.error(f"Failed to confirm position tx {tx_hash}: {e}")
-        return False
-
-
-def update_position_value(position_id: str, new_value: float) -> bool:
-    try:
-        with get_db_session() as session:
-            position = session.get(Position, position_id)
-            if position:
-                position.current_value = new_value
-                position.updated_at = datetime.utcnow()
-                return True
-            return False
-    except Exception as e:
-        logger.error(f"Failed to update position value: {e}")
-        return False
-
-
-def get_positions(wallet_address: Optional[str] = None) -> List[Dict[str, Any]]:
-    try:
-        with get_db_session() as session:
-            query = session.query(Position)
-            if wallet_address:
-                query = query.filter_by(wallet_address=Web3.to_checksum_address(wallet_address))
-            positions = query.all()
-            return [
-                {
-                    'id': p.id,
-                    'chain': p.chain,
-                    'wallet_address': p.wallet_address,
-                    'opportunity_name': p.opportunity_name,
-                    'token_symbol': p.token_symbol,
-                    'amount_invested': p.amount_invested,
-                    'current_value': p.current_value,
-                    'entry_date': p.entry_date,
-                    'exit_date': p.exit_date,
-                    'status': p.status,
-                    'tx_hash': p.tx_hash,
-                    'protocol': p.protocol,
-                    'apy': p.apy,
-                    'created_at': p.created_at,
-                    'updated_at': p.updated_at
-                } for p in positions
-            ]
-    except Exception as e:
-        logger.error(f"Failed to get positions: {e}")
-        return []
-
-
-def get_active_positions(wallet_address: Optional[str] = None) -> List[Dict[str, Any]]:
-    try:
-        with get_db_session() as session:
-            query = session.query(Position).filter_by(status='active')
-            if wallet_address:
-                query = query.filter_by(wallet_address=Web3.to_checksum_address(wallet_address))
-            positions = query.all()
-            return [
-                {
-                    'id': p.id,
-                    'chain': p.chain,
-                    'wallet_address': p.wallet_address,
-                    'opportunity_name': p.opportunity_name,
-                    'token_symbol': p.token_symbol,
-                    'amount_invested': p.amount_invested,
-                    'current_value': p.current_value,
-                    'entry_date': p.entry_date,
-                    'tx_hash': p.tx_hash,
-                    'protocol': p.protocol,
-                    'apy': p.apy
-                } for p in positions
-            ]
-    except Exception as e:
-        logger.error(f"Failed to get active positions: {e}")
-        return []
-
-
-# ----------------------- OPPORTUNITIES FUNCTIONS -----------------------
+# ----------------------------- Opportunities Functions -----------------------------
 def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
     try:
         with get_db_session() as session:
             for data in opp_data:
-                opp = Opportunity(
-                    id=data.get('id'),
-                    project=data['project'],
-                    symbol=data['symbol'],
-                    chain=data['chain'],
-                    apy=data['apy'],
-                    tvl=data['tvl'],
-                    risk=data['risk'],
-                    type=data['type'],
-                    contract_address=data['contract_address'],
-                    last_updated=datetime.utcnow(),
-                    is_active=True
-                )
+                apy = parse_float(data.get('apy', 0.0))
+                tvl = parse_float(data.get('tvl', 0.0))
+
+                opp_dict = {
+                    "project": data['project'],
+                    "symbol": data['symbol'],
+                    "chain": data['chain'],
+                    "apy": apy,
+                    "tvl": tvl,
+                    "risk": data['risk'],
+                    "type": data.get('type'),
+                    "contract_address": data['contract_address'],
+                    "last_updated": datetime.utcnow(),
+                    "is_active": True
+                }
+
+                if "id" in data and data["id"] is not None:
+                    opp_dict["id"] = data["id"]
+
+                opp = Opportunity(**opp_dict)
                 session.merge(opp)
         return True
     except Exception as e:
         logger.error(f"Failed to save opportunities: {e}")
         return False
 
+
+def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
+    try:
+        with get_db_session() as session:
+            for data in meme_data:
+                price = parse_float(data.get('price', 0.0))
+                market_cap = parse_float(data.get('market_cap', 0.0))
+
+                meme_dict = {
+                    "project": data['project'],
+                    "name": data['name'],
+                    "symbol": data['symbol'],
+                    "chain": data['chain'],
+                    "price": price,
+                    "market_cap": market_cap,
+                    "risk": data['risk'],
+                    "growth_potential": data.get('growth_potential', '0%'),
+                    "source_url": data.get('source_url'),
+                    "contract_address": data['contract_address'],
+                    "last_updated": datetime.utcnow(),
+                    "is_active": True
+                }
+
+                if "id" in data and data["id"] is not None:
+                    meme_dict["id"] = data["id"]
+
+                meme = MemeOpportunity(**meme_dict)
+                session.merge(meme)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save meme opportunities: {e}")
+        return False
+
+# ----------------------------- Retrieval Functions -----------------------------
 
 def get_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     try:
@@ -409,31 +303,6 @@ def get_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict
         return []
 
 
-def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
-    try:
-        with get_db_session() as session:
-            for data in meme_data:
-                meme = MemeOpportunity(
-                    project=data['project'],
-                    name=data['name'],
-                    symbol=data['symbol'],
-                    chain=data['chain'],
-                    price=data['price'],
-                    market_cap=data['market_cap'],
-                    risk=data['risk'],
-                    growth_potential=data['growth_potential'],
-                    source_url=data.get('source_url'),
-                    contract_address=data['contract_address'],
-                    last_updated=datetime.utcnow(),
-                    is_active=True
-                )
-                session.merge(meme)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save meme opportunities: {e}")
-        return False
-
-
 def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     try:
         with get_db_session() as session:
@@ -448,8 +317,8 @@ def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List
                     'name': m.name,
                     'symbol': m.symbol,
                     'chain': m.chain,
-                    'price': m.price,
-                    'market_cap': m.market_cap,
+                    'price': float(m.price),
+                    'market_cap': float(m.market_cap),
                     'risk': m.risk,
                     'growth_potential': m.growth_potential,
                     'source_url': m.source_url,
@@ -461,7 +330,6 @@ def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List
         logger.error(f"Failed to get meme opportunities: {e}")
         return []
 
-
-# ----------------------- INIT -----------------------
+# ----------------------------- Initialize DB -----------------------------
 if __name__ == "__main__":
     init_database()
