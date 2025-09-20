@@ -9,8 +9,7 @@ from web3 import Web3
 from hexbytes import HexBytes
 from sqlalchemy import BigInteger, Column, create_engine, select
 from sqlalchemy.orm import declarative_base, sessionmaker, Mapped, mapped_column
-from sqlalchemy.exc import SQLAlchemyError
-from sqlite3 import OperationalError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from utils import connect_to_chain
 
@@ -39,8 +38,8 @@ def get_engine():
         conn.close()
         logger.info("Connected to PostgreSQL successfully.")
         return engine
-    except OperationalError:
-        logger.warning("PostgreSQL not available. Falling back to SQLite.")
+    except Exception as e:
+        logger.warning(f"PostgreSQL not available: {e}. Falling back to SQLite.")
         engine = create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
         return engine
 
@@ -62,7 +61,6 @@ class Wallet(Base):
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
 
-
 class Position(Base):
     __tablename__ = "positions"
 
@@ -82,7 +80,6 @@ class Position(Base):
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
 
-
 class Opportunity(Base):
     __tablename__ = "opportunities"
 
@@ -97,7 +94,6 @@ class Opportunity(Base):
     contract_address: Mapped[str]
     last_updated: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     is_active: Mapped[bool] = mapped_column(default=True)
-
 
 class MemeOpportunity(Base):
     __tablename__ = "meme_opportunities"
@@ -130,7 +126,6 @@ def get_db_session():
     finally:
         session.close()
 
-
 def init_database() -> bool:
     try:
         Base.metadata.create_all(bind=engine)
@@ -140,7 +135,6 @@ def init_database() -> bool:
         logger.error(f"Failed to initialize database: {e}")
         return False
 
-
 # ----------------------------- Helper -----------------------------
 def parse_float(value: Any) -> float:
     try:
@@ -148,8 +142,24 @@ def parse_float(value: Any) -> float:
             value = value.replace("$", "").replace(",", "").strip()
         return float(value)
     except (ValueError, TypeError):
+        logger.warning(f"Failed to parse float from value: {value}. Returning 0.0")
         return 0.0
 
+def validate_opportunity_data(data: Dict[str, Any]) -> bool:
+    required_fields = ['project', 'symbol', 'chain', 'contract_address', 'apy', 'tvl', 'risk']
+    for field in required_fields:
+        if field not in data or data[field] is None or (isinstance(data[field], str) and not data[field].strip()):
+            logger.error(f"Missing or invalid required field: {field}")
+            return False
+    return True
+
+def validate_meme_opportunity_data(data: Dict[str, Any]) -> bool:
+    required_fields = ['project', 'name', 'symbol', 'chain', 'contract_address', 'price', 'market_cap', 'risk']
+    for field in required_fields:
+        if field not in data or data[field] is None or (isinstance(data[field], str) and not data[field].strip()):
+            logger.error(f"Missing or invalid required field for meme: {field}")
+            return False
+    return True
 
 # ----------------------------- Wallet Functions -----------------------------
 def save_wallet(wallet_id: str, chain: str, address: str,
@@ -184,7 +194,6 @@ def save_wallet(wallet_id: str, chain: str, address: str,
         logger.error(f"Failed to save wallet: {e}")
         return False
 
-
 # ----------------------------- Position Functions -----------------------------
 def save_position(position_id: str, chain: str, wallet_address: str,
                   opportunity_name: str, token_symbol: str,
@@ -210,14 +219,23 @@ def save_position(position_id: str, chain: str, wallet_address: str,
         logger.error(f"Failed to save position: {e}")
         return False
 
-
 # ----------------------------- Opportunities Functions -----------------------------
 def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
     try:
         with get_db_session() as session:
             for data in opp_data:
+                if not validate_opportunity_data(data):
+                    logger.warning(f"Skipping invalid opportunity data: {data}")
+                    continue
+
                 apy = parse_float(data.get('apy', 0.0))
                 tvl = parse_float(data.get('tvl', 0.0))
+
+                # Check for existing opportunity by contract_address and chain
+                existing = session.query(Opportunity).filter_by(
+                    contract_address=data['contract_address'],
+                    chain=data['chain']
+                ).first()
 
                 opp_dict = {
                     "project": data['project'],
@@ -232,23 +250,40 @@ def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
                     "is_active": True
                 }
 
-                if "id" in data and data["id"] is not None:
-                    opp_dict["id"] = data["id"]
+                if existing:
+                    # Update existing record
+                    for key, value in opp_dict.items():
+                        setattr(existing, key, value)
+                    session.merge(existing)
+                else:
+                    # Insert new record
+                    opp = Opportunity(**opp_dict)
+                    session.add(opp)
 
-                opp = Opportunity(**opp_dict)
-                session.merge(opp)
-        return True
+            return True
+    except IntegrityError as e:
+        logger.error(f"Integrity error while saving opportunities: {e}")
+        return False
     except Exception as e:
         logger.error(f"Failed to save opportunities: {e}")
         return False
-
 
 def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
     try:
         with get_db_session() as session:
             for data in meme_data:
+                if not validate_meme_opportunity_data(data):
+                    logger.warning(f"Skipping invalid meme opportunity data: {data}")
+                    continue
+
                 price = parse_float(data.get('price', 0.0))
                 market_cap = parse_float(data.get('market_cap', 0.0))
+
+                # Check for existing meme opportunity by contract_address and chain
+                existing = session.query(MemeOpportunity).filter_by(
+                    contract_address=data['contract_address'],
+                    chain=data['chain']
+                ).first()
 
                 meme_dict = {
                     "project": data['project'],
@@ -265,18 +300,25 @@ def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
                     "is_active": True
                 }
 
-                if "id" in data and data["id"] is not None:
-                    meme_dict["id"] = data["id"]
+                if existing:
+                    # Update existing record
+                    for key, value in meme_dict.items():
+                        setattr(existing, key, value)
+                    session.merge(existing)
+                else:
+                    # Insert new record
+                    meme = MemeOpportunity(**meme_dict)
+                    session.add(meme)
 
-                meme = MemeOpportunity(**meme_dict)
-                session.merge(meme)
-        return True
+            return True
+    except IntegrityError as e:
+        logger.error(f"Integrity error while saving meme opportunities: {e}")
+        return False
     except Exception as e:
         logger.error(f"Failed to save meme opportunities: {e}")
         return False
 
 # ----------------------------- Retrieval Functions -----------------------------
-
 def get_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     try:
         with get_db_session() as session:
@@ -301,7 +343,6 @@ def get_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict
     except Exception as e:
         logger.error(f"Failed to get opportunities: {e}")
         return []
-
 
 def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     try:
