@@ -7,9 +7,12 @@ from typing import List, Dict, Any, Optional
 
 from web3 import Web3
 from hexbytes import HexBytes
-from sqlalchemy import BigInteger, Column, create_engine, select
+from sqlalchemy import BigInteger, Column, create_engine, select, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, Mapped, mapped_column
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy.sql import text
+import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 from utils import connect_to_chain
 
@@ -31,8 +34,37 @@ POSTGRES_URL = os.getenv(
 SQLITE_URL = "sqlite:///defi_dashboard.db"
 
 # ----------------------------- Engine -----------------------------
+def create_postgres_database(db_url: str) -> None:
+    """Create the PostgreSQL database if it does not exist."""
+    try:
+        # Parse the database URL to extract components
+        db_name = db_url.split("/")[-1]
+        base_url = "/".join(db_url.split("/")[:-1])
+        
+        # Connect to PostgreSQL server (not specific database)
+        conn = psycopg2.connect(base_url)
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cursor = conn.cursor()
+        
+        # Check if database exists
+        cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
+        exists = cursor.fetchone()
+        
+        if not exists:
+            cursor.execute(f"CREATE DATABASE {db_name}")
+            logger.info(f"Created PostgreSQL database: {db_name}")
+        else:
+            logger.info(f"PostgreSQL database {db_name} already exists")
+        
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to create PostgreSQL database: {e}")
+
 def get_engine():
     try:
+        # Attempt to create the database first
+        create_postgres_database(POSTGRES_URL)
         engine = create_engine(POSTGRES_URL)
         conn = engine.connect()
         conn.close()
@@ -82,6 +114,9 @@ class Position(Base):
 
 class Opportunity(Base):
     __tablename__ = "opportunities"
+    __table_args__ = (
+        UniqueConstraint('contract_address', 'chain', name='uix_opportunities_contract_chain'),
+    )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     project: Mapped[str]
@@ -97,6 +132,9 @@ class Opportunity(Base):
 
 class MemeOpportunity(Base):
     __tablename__ = "meme_opportunities"
+    __table_args__ = (
+        UniqueConstraint('contract_address', 'chain', name='uix_meme_opportunities_contract_chain'),
+    )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     project: Mapped[str]
@@ -128,11 +166,28 @@ def get_db_session():
 
 def init_database() -> bool:
     try:
+        # Ensure database exists for PostgreSQL
+        if 'postgresql' in POSTGRES_URL:
+            create_postgres_database(POSTGRES_URL)
+        
+        # Create all tables
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created successfully")
+        
+        # Verify table existence
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'opportunities')"))
+            exists = result.scalar()
+            if not exists:
+                logger.error("Failed to create 'opportunities' table")
+                return False
+            logger.info("'opportunities' table verified")
         return True
     except SQLAlchemyError as e:
         logger.error(f"Failed to initialize database: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error during database initialization: {e}")
         return False
 
 # ----------------------------- Helper -----------------------------
@@ -372,5 +427,8 @@ def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List
         return []
 
 # ----------------------------- Initialize DB -----------------------------
+# Ensure database is initialized when module is imported
+init_database()
+
 if __name__ == "__main__":
     init_database()
