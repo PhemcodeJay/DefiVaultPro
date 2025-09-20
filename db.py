@@ -1,20 +1,26 @@
 import os
-import time
 import logging
 from datetime import datetime
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 
 from web3 import Web3
-from hexbytes import HexBytes
-from sqlalchemy import BigInteger, Column, create_engine, select, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    String,
+    Float,
+    Boolean,
+    DateTime,
+    Integer,
+    create_engine,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import declarative_base, sessionmaker, Mapped, mapped_column
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-from sqlalchemy.sql import text
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-
-from utils import connect_to_chain
 
 # ----------------------------- Logging -----------------------------
 logging.basicConfig(
@@ -35,27 +41,24 @@ SQLITE_URL = "sqlite:///defi_dashboard.db"
 
 # ----------------------------- Engine -----------------------------
 def create_postgres_database(db_url: str) -> None:
-    """Create the PostgreSQL database if it does not exist."""
+    """Create PostgreSQL DB if it doesn't exist."""
     try:
-        # Parse the database URL to extract components
         db_name = db_url.split("/")[-1]
         base_url = "/".join(db_url.split("/")[:-1])
-        
-        # Connect to PostgreSQL server (not specific database)
+
         conn = psycopg2.connect(base_url)
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
-        
-        # Check if database exists
+
         cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
         exists = cursor.fetchone()
-        
+
         if not exists:
             cursor.execute(f"CREATE DATABASE {db_name}")
             logger.info(f"Created PostgreSQL database: {db_name}")
         else:
             logger.info(f"PostgreSQL database {db_name} already exists")
-        
+
         cursor.close()
         conn.close()
     except Exception as e:
@@ -63,7 +66,6 @@ def create_postgres_database(db_url: str) -> None:
 
 def get_engine():
     try:
-        # Attempt to create the database first
         create_postgres_database(POSTGRES_URL)
         engine = create_engine(POSTGRES_URL)
         conn = engine.connect()
@@ -72,8 +74,7 @@ def get_engine():
         return engine
     except Exception as e:
         logger.warning(f"PostgreSQL not available: {e}. Falling back to SQLite.")
-        engine = create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
-        return engine
+        return create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
 
 engine = get_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -83,34 +84,34 @@ Base = declarative_base()
 class Wallet(Base):
     __tablename__ = "wallets"
 
-    id: Mapped[str] = mapped_column(primary_key=True)
-    chain: Mapped[str]
-    address: Mapped[str]
-    connected: Mapped[bool] = mapped_column(default=False)
-    verified: Mapped[bool] = mapped_column(default=False)
-    balance: Mapped[float] = mapped_column(default=0.0)
-    nonce: Mapped[Optional[int]] = mapped_column(default=None)
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    chain: Mapped[str] = mapped_column(String(50))
+    address: Mapped[str] = mapped_column(String(255))
+    connected: Mapped[bool] = mapped_column(Boolean, default=False)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    balance: Mapped[float] = mapped_column(Float, default=0.0)
+    nonce: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Position(Base):
     __tablename__ = "positions"
 
-    id: Mapped[str] = mapped_column(primary_key=True)
-    chain: Mapped[str]
-    wallet_address: Mapped[str]
-    opportunity_name: Mapped[str]
-    token_symbol: Mapped[str]
-    amount_invested: Mapped[float]
-    current_value: Mapped[float]
-    entry_date: Mapped[datetime] = mapped_column(default=datetime.utcnow)
-    exit_date: Mapped[Optional[datetime]] = mapped_column(default=None)
-    status: Mapped[str] = mapped_column(default="active")
-    tx_hash: Mapped[Optional[str]] = mapped_column(default=None)
-    protocol: Mapped[Optional[str]] = mapped_column(default=None)
-    apy: Mapped[Optional[float]] = mapped_column(default=None)
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    chain: Mapped[str] = mapped_column(String(50))
+    wallet_address: Mapped[str] = mapped_column(String(255))
+    opportunity_name: Mapped[str] = mapped_column(String(255))
+    token_symbol: Mapped[str] = mapped_column(String(50))
+    amount_invested: Mapped[float] = mapped_column(Float)
+    current_value: Mapped[float] = mapped_column(Float)
+    entry_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    exit_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="active")
+    tx_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    protocol: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    apy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Opportunity(Base):
     __tablename__ = "opportunities"
@@ -119,16 +120,16 @@ class Opportunity(Base):
     )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    project: Mapped[str]
-    symbol: Mapped[str]
-    chain: Mapped[str]
-    apy: Mapped[float]
-    tvl: Mapped[float]
-    risk: Mapped[str]
-    type: Mapped[Optional[str]]
-    contract_address: Mapped[str]
-    last_updated: Mapped[datetime] = mapped_column(default=datetime.utcnow)
-    is_active: Mapped[bool] = mapped_column(default=True)
+    project: Mapped[str] = mapped_column(String(100))
+    symbol: Mapped[str] = mapped_column(String(50))
+    chain: Mapped[str] = mapped_column(String(50))
+    apy: Mapped[float] = mapped_column(Float)
+    tvl: Mapped[float] = mapped_column(Float)
+    risk: Mapped[str] = mapped_column(String(20))
+    type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    contract_address: Mapped[str] = mapped_column(String(255))
+    last_updated: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 class MemeOpportunity(Base):
     __tablename__ = "meme_opportunities"
@@ -137,20 +138,20 @@ class MemeOpportunity(Base):
     )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    project: Mapped[str]
-    name: Mapped[str]
-    symbol: Mapped[str]
-    chain: Mapped[str]
-    price: Mapped[float]
-    market_cap: Mapped[float]
-    risk: Mapped[str]
-    growth_potential: Mapped[str]
-    source_url: Mapped[Optional[str]] = mapped_column(default=None)
-    contract_address: Mapped[str]
-    last_updated: Mapped[datetime] = mapped_column(default=datetime.utcnow)
-    is_active: Mapped[bool] = mapped_column(default=True)
+    project: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(255))
+    symbol: Mapped[str] = mapped_column(String(50))
+    chain: Mapped[str] = mapped_column(String(50))
+    price: Mapped[float] = mapped_column(Float)
+    market_cap: Mapped[float] = mapped_column(Float)
+    risk: Mapped[str] = mapped_column(String(20))
+    growth_potential: Mapped[str] = mapped_column(String(50))
+    source_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    contract_address: Mapped[str] = mapped_column(String(255))
+    last_updated: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-# ----------------------------- Database Utilities -----------------------------
+# ----------------------------- DB Session -----------------------------
 @contextmanager
 def get_db_session():
     session = SessionLocal()
@@ -166,130 +167,58 @@ def get_db_session():
 
 def init_database() -> bool:
     try:
-        # Ensure database exists for PostgreSQL
         if 'postgresql' in POSTGRES_URL:
             create_postgres_database(POSTGRES_URL)
-        
-        # Create all tables
+
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables created successfully")
-        
-        # Verify table existence
+
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'opportunities')"))
-            exists = result.scalar()
-            if not exists:
+            result = conn.execute(text(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'opportunities')"
+            ))
+            if not result.scalar():
                 logger.error("Failed to create 'opportunities' table")
                 return False
-            logger.info("'opportunities' table verified")
         return True
     except SQLAlchemyError as e:
         logger.error(f"Failed to initialize database: {e}")
         return False
     except Exception as e:
-        logger.error(f"Unexpected error during database initialization: {e}")
+        logger.error(f"Unexpected error: {e}")
         return False
 
-# ----------------------------- Helper -----------------------------
+# ----------------------------- Helpers -----------------------------
 def parse_float(value: Any) -> float:
     try:
         if isinstance(value, str):
             value = value.replace("$", "").replace(",", "").strip()
         return float(value)
     except (ValueError, TypeError):
-        logger.warning(f"Failed to parse float from value: {value}. Returning 0.0")
+        logger.warning(f"Failed to parse float: {value}")
         return 0.0
 
 def validate_opportunity_data(data: Dict[str, Any]) -> bool:
-    required_fields = ['project', 'symbol', 'chain', 'contract_address', 'apy', 'tvl', 'risk']
-    for field in required_fields:
-        if field not in data or data[field] is None or (isinstance(data[field], str) and not data[field].strip()):
-            logger.error(f"Missing or invalid required field: {field}")
-            return False
-    return True
+    required = ['project', 'symbol', 'chain', 'contract_address', 'apy', 'tvl', 'risk']
+    return all(data.get(f) not in (None, "", " ") for f in required)
 
 def validate_meme_opportunity_data(data: Dict[str, Any]) -> bool:
-    required_fields = ['project', 'name', 'symbol', 'chain', 'contract_address', 'price', 'market_cap', 'risk']
-    for field in required_fields:
-        if field not in data or data[field] is None or (isinstance(data[field], str) and not data[field].strip()):
-            logger.error(f"Missing or invalid required field for meme: {field}")
-            return False
-    return True
+    required = ['project', 'name', 'symbol', 'chain', 'contract_address', 'price', 'market_cap', 'risk']
+    return all(data.get(f) not in (None, "", " ") for f in required)
 
-# ----------------------------- Wallet Functions -----------------------------
-def save_wallet(wallet_id: str, chain: str, address: str,
-                connected: bool = False, verified: bool = False,
-                balance: float = 0.0, nonce: Optional[int] = None) -> bool:
-    if not Web3.is_checksum_address(address):
-        logger.error(f"Invalid checksum address: {address}")
-        return False
-    try:
-        with get_db_session() as session:
-            wallet = session.get(Wallet, wallet_id)
-            if wallet:
-                wallet.address = address
-                wallet.connected = connected
-                wallet.verified = verified
-                wallet.balance = balance
-                wallet.nonce = nonce
-                wallet.updated_at = datetime.utcnow()
-            else:
-                wallet = Wallet(
-                    id=wallet_id,
-                    chain=chain,
-                    address=address,
-                    connected=connected,
-                    verified=verified,
-                    balance=balance,
-                    nonce=nonce
-                )
-                session.add(wallet)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save wallet: {e}")
-        return False
-
-# ----------------------------- Position Functions -----------------------------
-def save_position(position_id: str, chain: str, wallet_address: str,
-                  opportunity_name: str, token_symbol: str,
-                  amount_invested: float, tx_hash: str,
-                  protocol: Optional[str] = None, apy: Optional[float] = None) -> bool:
-    try:
-        with get_db_session() as session:
-            position = Position(
-                id=position_id,
-                chain=chain,
-                wallet_address=Web3.to_checksum_address(wallet_address),
-                opportunity_name=opportunity_name,
-                token_symbol=token_symbol,
-                amount_invested=amount_invested,
-                current_value=amount_invested,
-                tx_hash=tx_hash,
-                protocol=protocol,
-                apy=apy
-            )
-            session.add(position)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to save position: {e}")
-        return False
-
-# ----------------------------- Opportunities Functions -----------------------------
+# ----------------------------- Save Functions -----------------------------
 def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
     try:
         with get_db_session() as session:
             for data in opp_data:
                 if not validate_opportunity_data(data):
-                    logger.warning(f"Skipping invalid opportunity data: {data}")
                     continue
 
                 apy = parse_float(data.get('apy', 0.0))
                 tvl = parse_float(data.get('tvl', 0.0))
 
-                # Check for existing opportunity by contract_address and chain
                 existing = session.query(Opportunity).filter_by(
-                    contract_address=data['contract_address'],
-                    chain=data['chain']
+                    contract_address=data['contract_address'], chain=data['chain']
                 ).first()
 
                 opp_dict = {
@@ -306,19 +235,11 @@ def save_opportunities(opp_data: List[Dict[str, Any]]) -> bool:
                 }
 
                 if existing:
-                    # Update existing record
-                    for key, value in opp_dict.items():
-                        setattr(existing, key, value)
-                    session.merge(existing)
+                    for k, v in opp_dict.items():
+                        setattr(existing, k, v)
                 else:
-                    # Insert new record
-                    opp = Opportunity(**opp_dict)
-                    session.add(opp)
-
-            return True
-    except IntegrityError as e:
-        logger.error(f"Integrity error while saving opportunities: {e}")
-        return False
+                    session.add(Opportunity(**opp_dict))
+        return True
     except Exception as e:
         logger.error(f"Failed to save opportunities: {e}")
         return False
@@ -328,16 +249,13 @@ def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
         with get_db_session() as session:
             for data in meme_data:
                 if not validate_meme_opportunity_data(data):
-                    logger.warning(f"Skipping invalid meme opportunity data: {data}")
                     continue
 
                 price = parse_float(data.get('price', 0.0))
                 market_cap = parse_float(data.get('market_cap', 0.0))
 
-                # Check for existing meme opportunity by contract_address and chain
                 existing = session.query(MemeOpportunity).filter_by(
-                    contract_address=data['contract_address'],
-                    chain=data['chain']
+                    contract_address=data['contract_address'], chain=data['chain']
                 ).first()
 
                 meme_dict = {
@@ -356,24 +274,16 @@ def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
                 }
 
                 if existing:
-                    # Update existing record
-                    for key, value in meme_dict.items():
-                        setattr(existing, key, value)
-                    session.merge(existing)
+                    for k, v in meme_dict.items():
+                        setattr(existing, k, v)
                 else:
-                    # Insert new record
-                    meme = MemeOpportunity(**meme_dict)
-                    session.add(meme)
-
-            return True
-    except IntegrityError as e:
-        logger.error(f"Integrity error while saving meme opportunities: {e}")
-        return False
+                    session.add(MemeOpportunity(**meme_dict))
+        return True
     except Exception as e:
         logger.error(f"Failed to save meme opportunities: {e}")
         return False
 
-# ----------------------------- Retrieval Functions -----------------------------
+# ----------------------------- Retrieval -----------------------------
 def get_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     try:
         with get_db_session() as session:
@@ -381,20 +291,7 @@ def get_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict
             if chain:
                 query = query.filter_by(chain=chain)
             opps = query.order_by(Opportunity.tvl.desc()).limit(limit).all()
-            return [
-                {
-                    'id': o.id,
-                    'project': o.project,
-                    'symbol': o.symbol,
-                    'chain': o.chain,
-                    'apy': o.apy,
-                    'tvl': o.tvl,
-                    'risk': o.risk,
-                    'type': o.type,
-                    'contract_address': o.contract_address,
-                    'last_updated': o.last_updated
-                } for o in opps
-            ]
+            return [o.__dict__ for o in opps]
     except Exception as e:
         logger.error(f"Failed to get opportunities: {e}")
         return []
@@ -406,28 +303,12 @@ def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List
             if chain:
                 query = query.filter_by(chain=chain)
             memes = query.order_by(MemeOpportunity.market_cap.desc()).limit(limit).all()
-            return [
-                {
-                    'id': m.id,
-                    'project': m.project,
-                    'name': m.name,
-                    'symbol': m.symbol,
-                    'chain': m.chain,
-                    'price': float(m.price),
-                    'market_cap': float(m.market_cap),
-                    'risk': m.risk,
-                    'growth_potential': m.growth_potential,
-                    'source_url': m.source_url,
-                    'contract_address': m.contract_address,
-                    'last_updated': m.last_updated
-                } for m in memes
-            ]
+            return [m.__dict__ for m in memes]
     except Exception as e:
         logger.error(f"Failed to get meme opportunities: {e}")
         return []
 
-# ----------------------------- Initialize DB -----------------------------
-# Ensure database is initialized when module is imported
+# ----------------------------- Init -----------------------------
 init_database()
 
 if __name__ == "__main__":
