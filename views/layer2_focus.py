@@ -1,13 +1,10 @@
 import streamlit as st
-import time
-import json
 import logging
-from wallet_utils import (
-    init_wallets, get_connected_wallet, add_position_to_session,
-    create_position, build_erc20_approve_tx_data, build_aave_supply_tx_data,
-    build_compound_supply_tx_data, confirm_tx
-)
-from config import NETWORK_LOGOS, PROTOCOL_LOGOS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
+from typing import List, Dict, Any
+from utils import safe_get, format_number, get_layer2_opportunities
+from wallet_utils import get_connected_wallet, NETWORK_NAMES
+from config import NETWORK_LOGOS, BALANCE_SYMBOLS
+from web3 import Web3
 from streamlit_javascript import st_javascript
 import db
 
@@ -22,209 +19,314 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
-def safe_get(obj, key, default):
-    if hasattr(obj, key):
-        return getattr(obj, key, default)
-    elif isinstance(obj, dict):
-        return obj.get(key, default)
-    return default
-
-def format_number(value: float) -> str:
-    try:
-        value = float(value)
-        if value >= 1_000_000_000:
-            return f"${value / 1_000_000_000:.2f}B"
-        elif value >= 1_000_000:
-            return f"${value / 1_000_000:.2f}M"
-        elif value >= 1_000:
-            return f"${value / 1_000:.2f}K"
-        return f"${value:,.2f}"
-    except Exception:
-        return str(value)
-
 def get_post_message():
+    """Retrieve the last JavaScript message."""
     return st_javascript("return window.lastMessage || {}")
 
-# --- Render Grid Cards ---
-def render_grid_cards(opps_list, category_name: str):
-    if "expanded_cards" not in st.session_state:
-        st.session_state.expanded_cards = {}
+# --- Page Title / Header ---
+def render():
+    st.title("🌉 Layer 2 Opportunities")
+    st.write("Explore high-yield opportunities on Layer 2 networks.")
 
-    if not opps_list:
-        st.warning(f"No {category_name} opportunities found.")
-        return
-
-    # Pagination
-    items_per_page = 10
-    total_pages = (len(opps_list) + items_per_page - 1) // items_per_page
-    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="page_layer2")
-    start_idx = (current_page - 1) * items_per_page
-    end_idx = start_idx + items_per_page
-    paginated_opps = opps_list[start_idx:end_idx]
+    # Wallet connection UI
+    wallet = get_connected_wallet(st.session_state, chain=None)  # Default to any chain
+    wallet_display = (
+        f"{wallet.address[:6]}...{wallet.address[-4:]}"
+        if wallet and wallet.address and Web3.is_address(wallet.address)
+        else "Not connected"
+    )
 
     st.markdown(
         """
-        <style>
-            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            .text-green-400 { color: #10B981; }
-            .text-yellow-400 { color: #F59E0B; }
-            .text-red-400 { color: #EF4444; }
-        </style>
-        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem;'>
+        <div class="text-center py-6">
+            <h1 class="text-3xl font-bold mb-2 bg-clip-text text-transparent 
+                bg-gradient-to-r from-indigo-400 to-blue-400">
+                Connect Your Wallet
+            </h1>
+            <p class="text-sm text-gray-400">
+                Connect via MetaMask or WalletConnect to interact with opportunities.
+            </p>
+        </div>
         """,
         unsafe_allow_html=True,
     )
 
-    for i, opp in enumerate(paginated_opps):
-        pool_id = safe_get(opp, "pool_id", f"unknown_{i}")
-        card_key = f"{category_name}_{pool_id}"
-        expanded = st.session_state.expanded_cards.get(card_key, False)
+    # Inject MetaMask and WalletConnect logic
+    st.markdown(
+        """
+        <!-- WalletConnect Modal -->
+        <script src="https://unpkg.com/@walletconnect/modal@2.6.2/dist/index.umd.js"></script>
+        <script src="https://cdn.ethers.io/lib/ethers-5.7.umd.min.js"></script>
 
-        chain = safe_get(opp, "chain", "unknown").lower()
-        project = safe_get(opp, "project", "Unknown")
-        symbol = safe_get(opp, "symbol", "Unknown")
-        apy = safe_get(opp, "apy", 0.0)
-        apy_str = f"{apy:.2f}%" if apy else "0%"
-        tvl_str = format_number(safe_get(opp, "tvl", 0))
-        risk = safe_get(opp, "risk", "Unknown")
-        contract_address = safe_get(opp, "contract_address", "0x0")
-        link = safe_get(opp, "link", "#")
+        <button id="connectButton"
+            style="background: linear-gradient(to right, #6366f1, #3b82f6);
+                   border:none; padding:12px 24px; border-radius:10px;
+                   color:white; font-size:16px; cursor:pointer;">
+            🔗 Connect Wallet
+        </button>
 
-        logo_url = NETWORK_LOGOS.get(chain, "https://via.placeholder.com/32?text=Logo")
-        protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/32?text=Protocol")
-        explorer_url = explorer_urls.get(chain, "#") + contract_address
+        <p id="walletAddress" style="margin-top:10px; font-size:14px; color:#9ca3af;">
+            Current: {wallet_display}
+        </p>
+
+        <script>
+        class MetaMaskConnector {{
+            constructor() {{
+                this.isConnected = false;
+                this.account = null;
+                this.chainId = null;
+                this.networkMap = {{
+                    '0x1': 'ethereum',
+                    '0x38': 'bsc',
+                    '0xa4b1': 'arbitrum',
+                    '0xa': 'optimism',
+                    '0x2105': 'base',
+                    '0xa86a': 'avalanche',
+                    '0xe9ac0ce': 'neon'
+                }};
+            }}
+
+            async connect() {{
+                if (typeof window.ethereum !== 'undefined') {{
+                    try {{
+                        const accounts = await window.ethereum.request({{ method: 'eth_requestAccounts' }});
+                        this.account = accounts[0];
+                        this.chainId = await window.ethereum.request({{ method: 'eth_chainId' }});
+                        this.isConnected = true;
+                        window.postMessage({{
+                            type: 'streamlit:connectWallet',
+                            address: this.account,
+                            chain: this.networkMap[this.chainId] || 'unknown',
+                            connector: 'MetaMask'
+                        }}, '*');
+                    }} catch (error) {{
+                        console.error('MetaMask connection failed:', error);
+                        window.postMessage({{
+                            type: 'streamlit:connectError',
+                            error: error.message
+                        }}, '*');
+                    }}
+                }} else {{
+                    window.postMessage({{
+                        type: 'streamlit:connectError',
+                        error: 'MetaMask not installed'
+                    }}, '*');
+                }}
+            }}
+
+            disconnect() {{
+                this.isConnected = false;
+                this.account = null;
+                this.chainId = null;
+                window.postMessage({{
+                    type: 'streamlit:disconnectWallet',
+                    connector: 'MetaMask'
+                }}, '*');
+            }}
+        }}
+
+        class WalletConnectConnector {{
+            constructor(projectId) {{
+                this.projectId = projectId;
+                this.modal = null;
+                this.provider = null;
+                this.isConnected = false;
+                this.account = null;
+                this.chainId = null;
+                this.networkMap = {{
+                    '0x1': 'ethereum',
+                    '0x38': 'bsc',
+                    '0xa4b1': 'arbitrum',
+                    '0xa': 'optimism',
+                    '0x2105': 'base',
+                    '0xa86a': 'avalanche',
+                    '0xe9ac0ce': 'neon'
+                }};
+            }}
+
+            async init() {{
+                try {{
+                    this.modal = new window.WalletConnectModal.default({{
+                        projectId: this.projectId,
+                        themeMode: 'dark'
+                    }});
+                }} catch (error) {{
+                    console.error('Failed to initialize WalletConnect:', error);
+                }}
+            }}
+
+            async connect() {{
+                if (!this.modal) await this.init();
+                try {{
+                    const provider = new ethers.providers.Web3Provider(this.modal.provider || window.ethereum);
+                    const accounts = await provider.listAccounts();
+                    this.account = accounts[0] || (await provider.getSigner().getAddress());
+                    const network = await provider.getNetwork();
+                    this.chainId = network.chainId.toString();
+                    this.isConnected = true;
+                    window.postMessage({{
+                        type: 'streamlit:connectWallet',
+                        address: this.account,
+                        chain: this.networkMap['0x' + parseInt(this.chainId).toString(16)] || 'unknown',
+                        connector: 'WalletConnect'
+                    }}, '*');
+                }} catch (error) {{
+                    console.error('WalletConnect connection failed:', error);
+                    window.postMessage({{
+                        type: 'streamlit:connectError',
+                        error: error.message
+                    }}, '*');
+                }}
+            }}
+
+            disconnect() {{
+                if (this.modal) this.modal.closeModal();
+                this.isConnected = false;
+                this.account = null;
+                this.chainId = null;
+                window.postMessage({{
+                    type: 'streamlit:disconnectWallet',
+                    connector: 'WalletConnect'
+                }}, '*');
+            }}
+        }}
+
+        const metaMask = new MetaMaskConnector();
+        const walletConnect = new WalletConnectConnector('bbfc8335f232745db239ec392b6a9d4a');
+        const connectButton = document.getElementById('connectButton');
+
+        connectButton.addEventListener('click', async () => {{
+            if (typeof window.ethereum !== 'undefined') {{
+                await metaMask.connect();
+            }} else {{
+                await walletConnect.connect();
+            }}
+        }});
+
+        window.addEventListener('message', (event) => {{
+            window.lastMessage = event.data;
+        }});
+        </script>
+        """.replace("{wallet_display}", wallet_display),
+        unsafe_allow_html=True
+    )
+
+    # Process connection messages
+    message = get_post_message()
+    if message.get("type") == "streamlit:connectWallet":
+        chain = safe_get(message, "chain", "unknown")
+        address = safe_get(message, "address", None)
+        connector = safe_get(message, "connector", "Unknown")
+        try:
+            if address and Web3.is_address(address):
+                address = Web3.to_checksum_address(address)
+                wallet = get_connected_wallet(st.session_state, chain)
+                if wallet:
+                    wallet.connect(address)
+                    st.success(f"Connected via {connector}: {address[:6]}...{address[-4:]}")
+                    st.rerun()
+                else:
+                    logger.error(f"Invalid chain: {chain}")
+                    st.error(f"Unsupported chain: {chain}")
+            else:
+                st.error("Invalid wallet address received.")
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+            st.error(f"Connection failed: {str(e)}")
+    elif message.get("type") == "streamlit:connectError":
+        st.error(f"Connection error: {safe_get(message, 'error', 'Unknown error')}")
+    elif message.get("type") == "streamlit:disconnectWallet":
+        connector = safe_get(message, "connector", "Unknown")
+        if wallet:
+            wallet.disconnect()
+            st.info(f"Disconnected from {connector}")
+            st.rerun()
+
+    # Fetch and validate L2 opportunities
+    l2_opps = get_layer2_opportunities()  # Assumed synchronous; returns List[Dict]
+    cleaned_opps = []
+    for opp in l2_opps:
+        try:
+            chain = safe_get(opp, "chain", "unknown")
+            project = safe_get(opp, "project", "Unknown")
+            token_symbol = safe_get(opp, "symbol", "Unknown")
+            protocol = safe_get(opp, "protocol", "Unknown")
+            if not all(isinstance(x, str) for x in [chain, project, token_symbol, protocol]):
+                logger.warning(f"Skipping invalid opportunity: {opp}")
+                continue
+            apy = float(safe_get(opp, "apy", 0.0))
+            tvl = float(safe_get(opp, "tvl", 0.0))
+            if apy < 0 or tvl < 0:
+                logger.warning(f"Skipping opportunity with negative APY/TVL: {opp}")
+                continue
+            cleaned_opps.append({
+                "chain": chain,
+                "project": project,
+                "token_symbol": token_symbol,
+                "protocol": protocol,
+                "apy": apy,
+                "tvl": tvl,
+                "url": safe_get(opp, "url", "#")
+            })
+        except Exception as e:
+            logger.warning(f"Error processing opportunity: {e}")
+            continue
+
+    if not cleaned_opps:
+        st.warning("No valid Layer 2 opportunities found.")
+        return
+
+    # Display opportunities
+    st.markdown(
+        """
+        <style>
+            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        </style>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        """,
+        unsafe_allow_html=True
+    )
+
+    for opp in cleaned_opps:
+        chain = opp["chain"]
+        project = opp["project"]
+        token_symbol = opp["token_symbol"]
+        protocol = opp["protocol"]
+        apy = opp["apy"]
+        tvl = opp["tvl"]
+        url = opp["url"]
+
+        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
+        chain_name = NETWORK_NAMES.get(chain.lower(), chain.capitalize())
 
         st.markdown(
             f"""
-            <div class="card" onclick="document.getElementById('{card_key}').click()">
-                <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
-                    <div style='display:flex;align-items:center;'>
-                        <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
-                        <h3 style='margin:0;font-size:1.1rem;'>{project}</h3>
-                    </div>
-                    <img src="{protocol_logo}" alt="{project}" style="width:24px;height:24px;border-radius:50%;">
+            <div class="card">
+                <div style="display:flex; align-items:center; margin-bottom:0.75rem;">
+                    <img src="{logo_url}" alt="{chain_name}" style="width:32px; height:32px; border-radius:50%; margin-right:0.6rem;">
+                    <h3 style="margin:0; font-size:1rem; font-weight:600; color:#c7d2fe;">
+                        {project}
+                    </h3>
                 </div>
-                <p style='margin:0.2rem 0;'><strong>Chain:</strong> {chain.capitalize()} | <strong>Symbol:</strong> {symbol}</p>
-                <p style='margin:0.2rem 0;'><strong>APY:</strong> <span class="text-green-400">{apy_str}</span></p>
-                <p style='margin:0.2rem 0;'><strong>TVL:</strong> {tvl_str}</p>
-                <p style='margin:0.2rem 0;'><strong>Risk:</strong> {risk}</p>
-                <a href="{link}" target="_blank" style='color:#6366f1;text-decoration:none;'>View on DeFiLlama ↗</a>
-                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;margin-left:1rem;'>Explorer ↗</a>
+                <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                    Chain: {chain_name} | Token: {token_symbol}
+                </p>
+                <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                    Protocol: {protocol}
+                </p>
+                <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                    APY: {apy:.2f}%
+                </p>
+                <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                    TVL: {format_number(tvl)}
+                </p>
+                <a href="{url}" target="_blank" style="color:#6366f1; text-decoration:none;">View Details ↗</a>
             </div>
             """,
             unsafe_allow_html=True
         )
 
-        if st.checkbox("Expand", key=card_key, value=expanded):
-            st.session_state.expanded_cards[card_key] = True
-            connected_wallet = get_connected_wallet(st.session_state, chain)
-            if connected_wallet and connected_wallet.connected:
-                if not connected_wallet.address:
-                    st.error("No connected wallet address found. Please connect your wallet first.")
-                    st.stop()
-
-                selected_token = st.selectbox("Select Token", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
-                amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")
-                if st.button("Invest Now", key=f"invest_{card_key}"):
-                    try:
-                        protocol = project.lower()
-                        chain_id = CHAIN_IDS.get(chain, 1)
-                        pool_address = CONTRACT_MAP.get(protocol, {}).get(chain, "0x0")
-                        token_address = ERC20_TOKENS.get(selected_token, {}).get(chain, "0x0")
-                        if not pool_address or not token_address:
-                            st.error("Invalid pool or token address")
-                            st.stop()
-
-                        # Approve transaction
-                        approve_tx = build_erc20_approve_tx_data(
-                            chain, token_address, pool_address, amount, connected_wallet.address
-                        )
-                        approve_tx['chainId'] = chain_id
-                        st.markdown(
-                            f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>",
-                            unsafe_allow_html=True
-                        )
-                        time.sleep(1)
-                        approve_resp = get_post_message()
-                        if approve_resp.get("type") == "streamlit:txSuccess" and approve_resp.get("txHash"):
-                            st.success("Approve confirmed!")
-                        else:
-                            st.error("Approve failed")
-                            st.stop()
-
-                        # Supply transaction
-                        if 'aave' in protocol:
-                            supply_tx = build_aave_supply_tx_data(
-                                chain, pool_address, token_address, amount, connected_wallet.address
-                            )
-                        elif 'compound' in protocol:
-                            supply_tx = build_compound_supply_tx_data(
-                                chain, pool_address, token_address, amount, connected_wallet.address
-                            )
-                        else:
-                            st.error(f"Unsupported protocol: {protocol}")
-                            st.stop()
-
-                        supply_tx['chainId'] = chain_id
-                        st.markdown(
-                            f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>",
-                            unsafe_allow_html=True
-                        )
-                        time.sleep(1)
-                        response = get_post_message()
-                        if response.get("type") == "streamlit:txSuccess" and response.get("txHash"):
-                            if confirm_tx(chain, response['txHash']):
-                                position = create_position(
-                                    chain, project, selected_token, amount, response['txHash'], protocol=protocol
-                                )
-                                add_position_to_session(st.session_state, position)
-                                st.success(f"Invested {amount} {selected_token} in {project}!")
-                            else:
-                                st.error("Supply transaction failed")
-                        else:
-                            st.error("Supply transaction failed")
-                    except Exception as e:
-                        st.error(f"Investment failed: {str(e)}")
-                    st.rerun()
-            else:
-                st.warning("Connect wallet to invest.")
-        else:
-            st.session_state.expanded_cards[card_key] = False
-
     st.markdown("</div>", unsafe_allow_html=True)
-
-# --- Main Render Function ---
-def render():
-    st.title("🚀 Layer 2 Focus")
-    st.write("Explore efficient DeFi opportunities on Layer 2 networks.")
-
-    # Initialize wallets
-    if 'wallets' not in st.session_state:
-        init_wallets(st.session_state)
-
-    # Chain Selection
-    SUPPORTED_CHAINS = ["ethereum", "bsc", "solana", "arbitrum", "optimism", "base", "avalanche", "neon"]
-    LAYER2_CHAINS = ["arbitrum", "optimism", "base"]
-    selected_chains = st.multiselect(
-        "Select Chains",
-        SUPPORTED_CHAINS,
-        default=LAYER2_CHAINS,
-        format_func=lambda x: f"⚡ {x.capitalize()}" if x in LAYER2_CHAINS else x.capitalize()
-    )
-
-    # Fetch Layer2 Opportunities from DB
-    @st.cache_data(ttl=300)
-    def cached_layer2_opps():
-        all_opps = db.get_opportunities(limit=100)
-        return [o for o in all_opps if o.get('chain', 'unknown').lower() in LAYER2_CHAINS]
-
-    with st.spinner("🔍 Scanning for Layer 2 opportunities..."):
-        layer2_opps = cached_layer2_opps()
-        layer2_opps = [o for o in layer2_opps if o.get('chain', 'unknown').lower() in selected_chains]
-        if not layer2_opps:
-            st.error("No opportunities found. Please check the database or run `python defi_scanner.py`.")
-        else:
-            render_grid_cards(layer2_opps, "layer2_focus")
 
 if __name__ == "__main__":
     render()

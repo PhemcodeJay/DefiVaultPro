@@ -7,7 +7,6 @@ import subprocess
 import sys
 import atexit
 import signal
-
 import db
 import wallet_utils
 
@@ -179,7 +178,7 @@ PAGE_MODULES = {
     "👛 Wallets": "views.wallets"
 }
 
-
+# --- Sidebar Navigation ---
 st.sidebar.markdown("<h3 style='color:#6366f1;'>Navigation</h3>", unsafe_allow_html=True)
 for page_name in PAGE_MODULES.keys():
     if st.sidebar.button(page_name, key=page_name):
@@ -196,16 +195,14 @@ def load_page(selected_page: str):
     try:
         page_module = importlib.import_module(module_name)
         render_func = getattr(page_module, "render", None)
-
         if not callable(render_func):
             st.warning(f"Module {selected_page} loaded but no render() found.")
             return
-
         render_func()
 
     except ImportError as e:
         logger.error(f"Failed to load page: {selected_page}. Error: {str(e)}")
-        st.error(f"Failed to load page: {selected_page}. Error: {str(e)}")
+        st.warning(f"Page {selected_page} is not available. Please select another page.")
     except Exception as e:
         logger.exception(f"Error rendering page {selected_page}: {e}")
         st.error(f"Error rendering page {selected_page}: {str(e)}")

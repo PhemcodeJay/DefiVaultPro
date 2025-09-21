@@ -29,7 +29,7 @@ def safe_get(obj, key, default):
         return obj.get(key, default)
     return default
 
-def format_number(value: float) -> str:
+def format_number(value) -> str:
     try:
         value = float(value)
         if value >= 1_000_000_000:
@@ -39,8 +39,8 @@ def format_number(value: float) -> str:
         elif value >= 1_000:
             return f"${value / 1_000:.2f}K"
         return f"${value:,.2f}"
-    except Exception:
-        return str(value)
+    except (ValueError, TypeError):
+        return "$0.00"
 
 def get_post_message():
     return st_javascript("return window.lastMessage || {}")
@@ -54,13 +54,66 @@ def render_meme_grid_cards(memes_list, category_name: str):
         st.warning(f"No {category_name} opportunities found.")
         return
 
+    # Validate and clean meme coins
+    cleaned_memes = []
+    for meme in memes_list:
+        try:
+            chain = safe_get(meme, "chain", "unknown")
+            project = safe_get(meme, "project", "Unknown")
+            name = safe_get(meme, "name", "Unknown")
+            symbol = safe_get(meme, "symbol", "Unknown")
+            risk = safe_get(meme, "risk", "Unknown")
+            # Ensure string fields are strings
+            if not all(isinstance(x, str) for x in [chain, project, name, symbol, risk]):
+                logger.warning(f"Skipping meme with invalid string fields: {meme}")
+                continue
+            # Ensure numeric fields are valid
+            price = float(safe_get(meme, "price", 0.0))
+            liquidity_usd = float(safe_get(meme, "liquidity_usd", 0.0))
+            volume_24h_usd = float(safe_get(meme, "volume_24h_usd", 0.0))
+            market_cap = float(safe_get(meme, "market_cap", 0.0))
+            if any(x < 0 for x in [price, liquidity_usd, volume_24h_usd, market_cap]):
+                logger.warning(f"Skipping meme with negative numeric values: {meme}")
+                continue
+            # Handle percentage fields
+            try:
+                change_24h_pct = float(safe_get(meme, "change_24h_pct", "0").strip("%"))
+                growth_potential = float(safe_get(meme, "growth_potential", "0").strip("%"))
+            except (ValueError, TypeError):
+                change_24h_pct = 0.0
+                growth_potential = 0.0
+
+            cleaned_memes.append({
+                "chain": chain.capitalize(),
+                "project": project,
+                "name": name,
+                "symbol": symbol,
+                "price": price,
+                "liquidity_usd": liquidity_usd,
+                "volume_24h_usd": volume_24h_usd,
+                "change_24h_pct": change_24h_pct,
+                "risk": risk,
+                "url": safe_get(meme, "url", "#"),
+                "contract_address": safe_get(meme, "contract_address", "0x0"),
+                "market_cap": market_cap,
+                "growth_potential": growth_potential,
+                "pool_id": safe_get(meme, "pool_id", f"unknown_{len(cleaned_memes)}")
+            })
+        except Exception as e:
+            logger.warning(f"Error processing meme {safe_get(meme, 'symbol', 'unknown')}: {e}")
+            continue
+
+    if not cleaned_memes:
+        st.warning(f"No valid {category_name} opportunities found after validation.")
+        return
+
     # Pagination
     items_per_page = 10
-    total_pages = (len(memes_list) + items_per_page - 1) // items_per_page
-    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="page_meme_coins")
+    total_pages = (len(cleaned_memes) + items_per_page - 1) // items_per_page
+    current_page = st.number_input("Page", min_value=1, max_value=max(1, total_pages), value=1, key="page_meme_coins")
     start_idx = (current_page - 1) * items_per_page
     end_idx = start_idx + items_per_page
-    paginated_memes = memes_list[start_idx:end_idx]
+    paginated_memes = cleaned_memes[start_idx:end_idx]
 
     st.markdown(
         """
@@ -75,23 +128,23 @@ def render_meme_grid_cards(memes_list, category_name: str):
     )
 
     for i, meme in enumerate(paginated_memes):
-        pool_id = safe_get(meme, "pool_id", f"unknown_{i}")
+        pool_id = meme["pool_id"]
         card_key = f"{category_name}_{pool_id}"
         expanded = st.session_state.expanded_cards.get(card_key, False)
 
-        chain = safe_get(meme, "chain", "unknown").capitalize()
-        project = safe_get(meme, "project", "Unknown")
-        name = safe_get(meme, "name", "Unknown")
-        symbol = safe_get(meme, "symbol", "Unknown")
-        price = safe_get(meme, "price", "0.00")
-        liquidity_usd = safe_get(meme, "liquidity_usd", "0")
-        volume_24h_usd = safe_get(meme, "volume_24h_usd", "0")
-        change_24h_pct = safe_get(meme, "change_24h_pct", "0%")
-        risk = safe_get(meme, "risk", "Unknown")
-        url = safe_get(meme, "url", "#")
-        contract_address = safe_get(meme, "contract_address", "0x0")
-        market_cap = format_number(safe_get(meme, "market_cap", 0))
-        growth_potential = safe_get(meme, "growth_potential", "0%")
+        chain = meme["chain"]
+        project = meme["project"]
+        name = meme["name"]
+        symbol = meme["symbol"]
+        price = meme["price"]
+        liquidity_usd = meme["liquidity_usd"]
+        volume_24h_usd = meme["volume_24h_usd"]
+        change_24h_pct = meme["change_24h_pct"]
+        risk = meme["risk"]
+        url = meme["url"]
+        contract_address = meme["contract_address"]
+        market_cap = format_number(meme["market_cap"])
+        growth_potential = f"{meme['growth_potential']:.2f}%"
 
         logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
         protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/32?text=Protocol")
@@ -108,12 +161,14 @@ def render_meme_grid_cards(memes_list, category_name: str):
                     <img src="{protocol_logo}" alt="{project}" style="width:24px;height:24px;border-radius:50%;">
                 </div>
                 <p style='margin:0.2rem 0;'><strong>Chain:</strong> {chain} | <strong>Symbol:</strong> {symbol}</p>
-                <p style='margin:0.2rem 0;'><strong>Price:</strong> {price}</p>
-                <p style='margin:0.2rem 0;'><strong>Liquidity:</strong> {liquidity_usd} | <strong>Volume 24h:</strong> {volume_24h_usd}</p>
-                <p style='margin:0.2rem 0;'><strong>24h Change:</strong> {change_24h_pct}</p>
-                <p style='margin:0.2rem 0;'><strong>Risk:</strong> {risk} | <strong>Market Cap:</strong> {market_cap}</p>
+                <p style='margin:0.2rem 0;'><strong>Price:</strong> {format_number(price)}</p>
+                <p style='margin:0.2rem 0;'><strong>Market Cap:</strong> {market_cap}</p>
+                <p style='margin:0.2rem 0;'><strong>Liquidity:</strong> {format_number(liquidity_usd)}</p>
+                <p style='margin:0.2rem 0;'><strong>Volume (24h):</strong> {format_number(volume_24h_usd)}</p>
+                <p style='margin:0.2rem 0;'><strong>24h Change:</strong> <span class="{'text-green-400' if change_24h_pct >= 0 else 'text-red-400'}">{change_24h_pct:.2f}%</span></p>
+                <p style='margin:0.2rem 0;'><strong>Risk:</strong> {risk}</p>
                 <p style='margin:0.2rem 0;'><strong>Growth Potential:</strong> {growth_potential}</p>
-                <a href="{url}" target="_blank" style='color:#6366f1;text-decoration:none;'>View on DexScreener ↗</a>
+                <a href="{url}" target="_blank" style='color:#6366f1;text-decoration:none;'>View Details ↗</a>
                 <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;margin-left:1rem;'>Explorer ↗</a>
             </div>
             """,
@@ -122,30 +177,27 @@ def render_meme_grid_cards(memes_list, category_name: str):
 
         if st.checkbox("Expand", key=card_key, value=expanded):
             st.session_state.expanded_cards[card_key] = True
-            connected_wallet = get_connected_wallet(st.session_state, chain.lower())
-
+            connected_wallet = get_connected_wallet(st.session_state, chain=chain.lower())
             if connected_wallet and connected_wallet.address:
                 selected_token = st.selectbox("Select Token to Swap", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
                 amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")
                 if st.button("Swap Now", key=f"swap_{card_key}"):
                     try:
                         chain_id = CHAIN_IDS.get(chain.lower(), 1)
+                        router_address = CONTRACT_MAP.get("uniswap", {}).get(chain.lower(), "0x0")
                         token_address = ERC20_TOKENS.get(selected_token, {}).get(chain.lower(), "0x0")
-                        router_address = CONTRACT_MAP.get('uniswap', {}).get(chain.lower(), "0x0")
                         if not router_address or not token_address:
                             st.error("Invalid router or token address")
                             continue
 
-                        # Approve first
                         approve_tx = build_erc20_approve_tx_data(
-                            chain.lower(),
-                            token_address,
-                            router_address,
-                            amount,
-                            str(connected_wallet.address)  # enforce str
+                            chain.lower(), token_address, router_address, amount, str(connected_wallet.address)
                         )
                         approve_tx['chainId'] = chain_id
-                        st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
+                        st.markdown(
+                            f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>",
+                            unsafe_allow_html=True
+                        )
                         time.sleep(1)
                         approve_resp = get_post_message()
                         if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
@@ -154,7 +206,6 @@ def render_meme_grid_cards(memes_list, category_name: str):
                             st.error("Approve failed")
                             continue
 
-                        # Build swap tx data
                         swap_data = build_uniswap_swap_tx_data(
                             chain=chain.lower(),
                             token_in=token_address,
@@ -172,7 +223,10 @@ def render_meme_grid_cards(memes_list, category_name: str):
                             "chainId": chain_id
                         }
 
-                        st.markdown(f"<script>performDeFiAction('swap',{json.dumps(swap_tx)});</script>", unsafe_allow_html=True)
+                        st.markdown(
+                            f"<script>performDeFiAction('swap',{json.dumps(swap_tx)});</script>",
+                            unsafe_allow_html=True
+                        )
                         time.sleep(1)
                         swap_resp = get_post_message()
                         if swap_resp.get("type") == "streamlit:txSuccess" and isinstance(swap_resp.get("txHash"), str) and swap_resp.get("txHash"):
@@ -185,7 +239,8 @@ def render_meme_grid_cards(memes_list, category_name: str):
                         else:
                             st.error("Swap failed")
                     except Exception as e:
-                        st.error(f"Swap error: {e}")
+                        logger.error(f"Swap failed for {symbol}: {e}")
+                        st.error(f"Swap error: {str(e)}")
                     st.rerun()
             else:
                 st.warning("Connect wallet to swap.")

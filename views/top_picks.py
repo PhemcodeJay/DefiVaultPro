@@ -12,8 +12,6 @@ from wallet_utils import (
 from config import NETWORK_LOGOS, PROTOCOL_LOGOS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
 
-import wallet_utils
-
 # --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +30,7 @@ def safe_get(obj, key, default):
         return obj.get(key, default)
     return default
 
-def format_number(value: float) -> str:
+def format_number(value) -> str:
     try:
         value = float(value)
         if value >= 1_000_000_000:
@@ -42,8 +40,8 @@ def format_number(value: float) -> str:
         elif value >= 1_000:
             return f"${value / 1_000:.2f}K"
         return f"${value:,.2f}"
-    except Exception:
-        return str(value)
+    except (ValueError, TypeError):
+        return "$0.00"
 
 def get_post_message():
     return st_javascript("return window.lastMessage || {}")
@@ -57,12 +55,52 @@ def render_grid_cards(opps_list, category_name: str):
         st.warning(f"No {category_name} opportunities found.")
         return
 
+    # Validate and clean opportunities
+    cleaned_opps = []
+    for opp in opps_list:
+        try:
+            chain = safe_get(opp, "chain", "unknown")
+            project = safe_get(opp, "project", "Unknown")
+            symbol = safe_get(opp, "symbol", "Unknown")
+            risk = safe_get(opp, "risk", "Unknown")
+            # Ensure string fields are strings
+            if not all(isinstance(x, str) for x in [chain, project, symbol, risk]):
+                logger.warning(f"Skipping opportunity with invalid string fields: {opp}")
+                continue
+            # Ensure numeric fields are valid
+            apy = float(safe_get(opp, "apy", 0.0))
+            tvl = float(safe_get(opp, "tvl", 0.0))
+            if apy < 0 or tvl < 0:
+                logger.warning(f"Skipping opportunity with negative apy/tvl: {opp}")
+                continue
+
+            cleaned_opps.append({
+                "chain": chain.capitalize(),
+                "project": project,
+                "symbol": symbol,
+                "apy": apy,
+                "tvl": tvl,
+                "risk": risk,
+                "type": safe_get(opp, "type", "Unknown"),
+                "contract_address": safe_get(opp, "contract_address", "0x0"),
+                "link": safe_get(opp, "link", "#"),
+                "pool_id": safe_get(opp, "pool_id", f"unknown_{len(cleaned_opps)}")
+            })
+        except Exception as e:
+            logger.warning(f"Error processing opportunity {safe_get(opp, 'project', 'unknown')}: {e}")
+            continue
+
+    if not cleaned_opps:
+        st.warning(f"No valid {category_name} opportunities found after validation.")
+        return
+
+    # Pagination
     items_per_page = 10
-    total_pages = (len(opps_list) + items_per_page - 1) // items_per_page
-    current_page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key=f"page_{category_name}")
+    total_pages = (len(cleaned_opps) + items_per_page - 1) // items_per_page
+    current_page = st.number_input("Page", min_value=1, max_value=max(1, total_pages), value=1, key=f"page_{category_name}")
     start_idx = (current_page - 1) * items_per_page
     end_idx = start_idx + items_per_page
-    paginated_opps = opps_list[start_idx:end_idx]
+    paginated_opps = cleaned_opps[start_idx:end_idx]
 
     st.markdown(
         """
@@ -78,20 +116,20 @@ def render_grid_cards(opps_list, category_name: str):
     )
 
     for i, opp in enumerate(paginated_opps):
-        pool_id = safe_get(opp, "pool_id", f"unknown_{i}")
+        pool_id = opp["pool_id"]
         card_key = f"{category_name}_{pool_id}"
         expanded = st.session_state.expanded_cards.get(card_key, False)
 
-        chain = safe_get(opp, "chain", "unknown").capitalize()
-        project = safe_get(opp, "project", "Unknown")
-        symbol = safe_get(opp, "symbol", "Unknown")
-        apy = safe_get(opp, "apy", 0.0)
-        apy_str = f"{apy:.2f}%" if apy else "0%"
-        tvl_str = format_number(safe_get(opp, "tvl", 0))
-        risk = safe_get(opp, "risk", "Unknown")
-        type_ = safe_get(opp, "type", "Unknown")
-        contract_address = safe_get(opp, "contract_address", "0x0")
-        link = safe_get(opp, "link", "#")
+        chain = opp["chain"]
+        project = opp["project"]
+        symbol = opp["symbol"]
+        apy = opp["apy"]
+        apy_str = f"{apy:.2f}%"
+        tvl_str = format_number(opp["tvl"])
+        risk = opp["risk"]
+        type_ = opp["type"]
+        contract_address = opp["contract_address"]
+        link = opp["link"]
 
         logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
         protocol_logo = PROTOCOL_LOGOS.get(project.lower(), "https://via.placeholder.com/32?text=Protocol")
@@ -120,63 +158,64 @@ def render_grid_cards(opps_list, category_name: str):
 
         if st.checkbox("Expand", key=card_key, value=expanded):
             st.session_state.expanded_cards[card_key] = True
-            connected_wallet = get_connected_wallet(st.session_state, chain.lower())
+            connected_wallet = get_connected_wallet(st.session_state, chain=chain.lower())
             if not connected_wallet or not connected_wallet.address:
                 st.warning("⚠️ Please connect your wallet for this chain before continuing.")
-                return
+                continue
 
-            if connected_wallet:
-                selected_token = st.selectbox("Select Token", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
-                amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")
-                if st.button("Invest Now", key=f"invest_{card_key}"):
-                    try:
-                        protocol = project.lower()
-                        chain_id = CHAIN_IDS.get(chain.lower(), 1)
-                        pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower(), "0x0")
-                        token_address = ERC20_TOKENS.get(selected_token, {}).get(chain.lower(), "0x0")
-                        if not pool_address or not token_address:
-                            st.error("Invalid pool or token address")
-                            continue
+            selected_token = st.selectbox("Select Token", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
+            amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")
+            if st.button("Invest Now", key=f"invest_{card_key}"):
+                try:
+                    protocol = project.lower()
+                    chain_id = CHAIN_IDS.get(chain.lower(), 1)
+                    pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower(), "0x0")
+                    token_address = ERC20_TOKENS.get(selected_token, {}).get(chain.lower(), "0x0")
+                    if not pool_address or not token_address:
+                        st.error("Invalid pool or token address")
+                        continue
 
-                        # Fixed: Ensure correct parameters for build_erc20_approve_tx_data
-                        approve_tx = build_erc20_approve_tx_data(chain.lower(), token_address, pool_address, amount, connected_wallet.address)
-                        approve_tx['chainId'] = chain_id
-                        st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
-                        time.sleep(1)
-                        approve_resp = get_post_message()
-                        if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
-                            st.success("Approve confirmed!")
-                        else:
-                            st.error("Approve failed")
-                            continue
+                    approve_tx = build_erc20_approve_tx_data(
+                        chain.lower(), token_address, pool_address, amount, str(connected_wallet.address)
+                    )
+                    approve_tx['chainId'] = chain_id
+                    st.markdown(
+                        f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>",
+                        unsafe_allow_html=True
+                    )
 
-                        if 'aave' in protocol:
-                            supply_tx = build_aave_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
-                        elif 'compound' in protocol:
-                            supply_tx = build_compound_supply_tx_data(chain.lower(), pool_address, token_address, amount, connected_wallet.address)
-                        else:
-                            st.error(f"Unsupported protocol: {protocol}")
-                            continue
-
-                        supply_tx['chainId'] = chain_id
-                        st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
-                        time.sleep(1)
-                        response = get_post_message()
-                        if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                            if confirm_tx(chain.lower(), response['txHash']):
-                                position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
-                                add_position_to_session(st.session_state, position)
-                                st.success(f"Invested {amount} {selected_token} in {project}!")
+                    response = get_post_message()
+                    if response and response.get('status') == 'success' and response.get('txHash'):
+                        if confirm_tx(chain.lower(), response['txHash']):
+                            if protocol in ['aave', 'compound']:
+                                supply_tx = (
+                                    build_aave_supply_tx_data if protocol == 'aave' else build_compound_supply_tx_data
+                                )(chain.lower(), pool_address, token_address, amount, str(connected_wallet.address))
+                                supply_tx['chainId'] = chain_id
+                                st.markdown(
+                                    f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>",
+                                    unsafe_allow_html=True
+                                )
+                                response = get_post_message()
+                                if response and response.get('status') == 'success' and response.get('txHash'):
+                                    if confirm_tx(chain.lower(), response['txHash']):
+                                        position = create_position(chain.lower(), project, selected_token, amount, response['txHash'])
+                                        add_position_to_session(st.session_state, position)
+                                        st.success(f"Invested {amount} {selected_token} in {project}!")
+                                    else:
+                                        st.error("Supply transaction failed")
+                                else:
+                                    st.error("Supply transaction failed")
                             else:
-                                st.error("Supply transaction failed")
+                                st.error(f"Unsupported protocol: {protocol}")
                         else:
-                            st.error("Supply transaction failed")
-                    except Exception as e:
-                        logger.error(f"Investment failed for {project}: {e}")
-                        st.error(f"Investment failed: {str(e)}")
-                    st.rerun()
-            else:
-                st.warning("Connect wallet to invest.")
+                            st.error("Approval transaction failed")
+                    else:
+                        st.error("Approval transaction failed")
+                except Exception as e:
+                    logger.error(f"Investment failed for {project}: {e}")
+                    st.error(f"Investment failed: {str(e)}")
+                st.rerun()
         else:
             st.session_state.expanded_cards[card_key] = False
 
@@ -188,29 +227,70 @@ def render_ml_grid_cards(opps_list, category_name: str):
         st.warning(f"No {category_name} opportunities found.")
         return
 
+    # Validate and clean ML opportunities
+    cleaned_opps = []
+    for opp in opps_list:
+        try:
+            chain = safe_get(opp, "chain", "unknown")
+            project = safe_get(opp, "project", safe_get(opp, "symbol", "Unknown"))
+            symbol = safe_get(opp, "symbol", "Unknown")
+            risk = safe_get(opp, "risk", "Unknown")
+            if not all(isinstance(x, str) for x in [chain, project, symbol, risk]):
+                logger.warning(f"Skipping ML opportunity with invalid string fields: {opp}")
+                continue
+            apy = float(safe_get(opp, "apy", 0.0))
+            tvl = float(safe_get(opp, "tvl", 0.0))
+            final_score = float(safe_get(opp, "final_score", 0.0))
+            predicted = float(safe_get(opp, "predicted_ror", safe_get(opp, "predicted_growth", 0.0)))
+            if apy < 0 or tvl < 0 or final_score < 0:
+                logger.warning(f"Skipping ML opportunity with negative values: {opp}")
+                continue
+
+            cleaned_opps.append({
+                "chain": chain.capitalize(),
+                "project": project,
+                "symbol": symbol,
+                "apy": apy,
+                "tvl": tvl,
+                "risk": risk,
+                "final_score": final_score,
+                "predicted_ror": predicted,
+                "type": safe_get(opp, "type", "Unknown"),
+                "link": safe_get(opp, "link", "#"),
+                "pool_id": safe_get(opp, "pool_id", f"unknown_{len(cleaned_opps)}")
+            })
+        except Exception as e:
+            logger.warning(f"Error processing ML opportunity {safe_get(opp, 'project', 'unknown')}: {e}")
+            continue
+
+    if not cleaned_opps:
+        st.warning(f"No valid {category_name} opportunities found after validation.")
+        return
+
+    # Pagination
     items_per_page = 10
-    total_pages = (len(opps_list) + items_per_page - 1) // items_per_page
-    current_page = st.number_input(f"{category_name} Page", min_value=1, max_value=total_pages, value=1, key=f"ml_page_{category_name}")
+    total_pages = (len(cleaned_opps) + items_per_page - 1) // items_per_page
+    current_page = st.number_input(f"{category_name} Page", min_value=1, max_value=max(1, total_pages), value=1, key=f"ml_page_{category_name}")
     start_idx = (current_page - 1) * items_per_page
     end_idx = start_idx + items_per_page
-    paginated_opps = opps_list[start_idx:end_idx]
+    paginated_opps = cleaned_opps[start_idx:end_idx]
 
     st.markdown("<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;'>", unsafe_allow_html=True)
     for i, opp in enumerate(paginated_opps):
-        pool_id = safe_get(opp, "pool_id", f"unknown_{i}")
+        pool_id = opp["pool_id"]
         card_key = f"{category_name}_{pool_id}"
 
-        project = safe_get(opp, "project", safe_get(opp, "symbol", "Unknown"))
-        chain = safe_get(opp, "chain", "Unknown").capitalize()
-        symbol = safe_get(opp, "symbol", "Unknown")
-        apy = safe_get(opp, "apy", 0.0)
-        apy_str = f"{apy:.2f}%" if apy else "0%"
-        tvl_str = format_number(safe_get(opp, "tvl", 0))
-        risk = safe_get(opp, "risk", "Unknown")
-        final_score = safe_get(opp, "final_score", 0)
-        predicted = safe_get(opp, "predicted_ror", safe_get(opp, "predicted_growth", 0))
-        type_ = safe_get(opp, "type", "Unknown")
-        link = safe_get(opp, "link", "#")
+        project = opp["project"]
+        chain = opp["chain"]
+        symbol = opp["symbol"]
+        apy = opp["apy"]
+        apy_str = f"{apy:.2f}%"
+        tvl_str = format_number(opp["tvl"])
+        risk = opp["risk"]
+        final_score = opp["final_score"]
+        predicted = opp["predicted_ror"]
+        type_ = opp["type"]
+        link = opp["link"]
 
         st.markdown(
             f"""
@@ -240,13 +320,8 @@ def render():
     tab1, tab2 = st.tabs(["🏆 Top Picks", "🤖 ML Analysis"])
 
     with tab1:
-        # Fetch top picks from DB
-        @st.cache_data(ttl=300)
-        def cached_top_picks():
-            return db.get_opportunities(limit=100)
-
         with st.spinner("🔍 Scanning for top DeFi opportunities..."):
-            top_picks = cached_top_picks()
+            top_picks = db.get_opportunities(limit=100)
             if not top_picks:
                 st.error("No opportunities found in DB. Ensure `defi_scanner.py` is running.")
             else:
@@ -295,8 +370,8 @@ def render():
         render_ml_grid_cards(memes, "memes")
 
         if yields and memes:
-            avg_yield_score = sum([safe_get(y, "final_score", 0) for y in yields]) / len(yields)
-            avg_meme_score = sum([safe_get(m, "final_score", 0) for m in memes]) / len(memes)
+            avg_yield_score = sum(float(safe_get(y, "final_score", 0.0)) for y in yields) / len(yields)
+            avg_meme_score = sum(float(safe_get(m, "final_score", 0.0)) for m in memes) / len(memes)
             st.markdown(f"**Average Risk-Adjusted Yield Score:** {avg_yield_score:.2f}")
             st.markdown(f"**Average Risk-Adjusted Meme Growth Score:** {avg_meme_score:.2f}")
 

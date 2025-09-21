@@ -25,9 +25,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Placeholder Withdraw Functions (To be replaced if actual implementations exist) ---
+# --- Placeholder Withdraw Functions ---
 def build_aave_withdraw_tx_data(chain: str, pool_address: str, token_address: str, amount: float, wallet_address: str) -> dict:
-    """Placeholder for Aave withdraw transaction data."""
     try:
         w3 = connect_to_chain(chain)
         if not w3:
@@ -45,7 +44,6 @@ def build_aave_withdraw_tx_data(chain: str, pool_address: str, token_address: st
         raise
 
 def build_compound_withdraw_tx_data(chain: str, pool_address: str, token_address: str, amount: float, wallet_address: str) -> dict:
-    """Placeholder for Compound withdraw transaction data."""
     try:
         w3 = connect_to_chain(chain)
         if not w3:
@@ -70,7 +68,7 @@ def safe_get(obj, key, default):
         return obj.get(key, default)
     return default
 
-def format_number(value: float) -> str:
+def format_number(value) -> str:
     try:
         value = float(value)
         if value >= 1_000_000_000:
@@ -80,8 +78,8 @@ def format_number(value: float) -> str:
         elif value >= 1_000:
             return f"${value / 1_000:.2f}K"
         return f"${value:,.2f}"
-    except Exception:
-        return str(value)
+    except (ValueError, TypeError):
+        return "$0.00"
 
 def get_post_message():
     return st_javascript("return window.lastMessage || {}")
@@ -92,12 +90,49 @@ def render_opportunity_table(opps_list, category_name: str, allow_invest=True):
         st.warning(f"No {category_name.replace('_', ' ').title()} opportunities found.")
         return
 
-    # Convert to DataFrame for tabular display
-    df = pd.DataFrame(opps_list)
-    df['apy'] = df['apy'].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) else "0%")
-    df['tvl'] = df['tvl'].apply(format_number)
-    df['chain'] = df['chain'].str.capitalize()
-    df['risk'] = df['risk'].fillna('Unknown')
+    # Validate and clean data
+    cleaned_opps = []
+    for opp in opps_list:
+        try:
+            chain = safe_get(opp, 'chain', 'unknown')
+            project = safe_get(opp, 'project', 'Unknown')
+            symbol = safe_get(opp, 'symbol', 'Unknown')
+            risk = safe_get(opp, 'risk', 'Unknown')
+            # Ensure string fields are strings
+            if not all(isinstance(x, str) for x in [chain, project, symbol, risk]):
+                logger.warning(f"Skipping opportunity with invalid string fields: {opp}")
+                continue
+            # Ensure numeric fields are valid
+            apy = float(safe_get(opp, 'apy', 0.0))
+            tvl = float(safe_get(opp, 'tvl', 0.0))
+            if apy < 0 or tvl < 0:
+                logger.warning(f"Skipping opportunity with negative apy/tvl: {opp}")
+                continue
+
+            cleaned_opps.append({
+                'chain': chain.capitalize(),
+                'project': project,
+                'symbol': symbol,
+                'apy': apy,
+                'tvl': tvl,
+                'risk': risk,
+                'type': safe_get(opp, 'type', 'Unknown'),
+                'contract_address': safe_get(opp, 'contract_address', '0x0'),
+                'link': safe_get(opp, 'link', '#'),
+                'pool_id': safe_get(opp, 'pool_id', f"unknown_{len(cleaned_opps)}")
+            })
+        except Exception as e:
+            logger.warning(f"Skipping invalid opportunity {safe_get(opp, 'project', 'unknown')}: {e}")
+            continue
+
+    if not cleaned_opps:
+        st.warning(f"No valid {category_name.replace('_', ' ').title()} opportunities found after validation.")
+        return
+
+    # Convert to DataFrame
+    df = pd.DataFrame(cleaned_opps)
+    df['apy_str'] = df['apy'].apply(lambda x: f"{x:.2f}%" if x is not None else "0%")
+    df['tvl_str'] = df['tvl'].apply(format_number)
 
     # Filtering
     with st.expander("Filter Opportunities", expanded=False):
@@ -107,20 +142,20 @@ def render_opportunity_table(opps_list, category_name: str, allow_invest=True):
         
         filtered_df = df[
             (df['chain'].isin(chains)) &
-            (df['apy'].str.rstrip('%').astype(float) >= min_apy) &
+            (df['apy'] >= min_apy) &
             (df['risk'].isin(risks))
         ]
 
     # Display table
     st.dataframe(
-        filtered_df[['chain', 'project', 'symbol', 'apy', 'tvl', 'risk', 'type']],
+        filtered_df[['chain', 'project', 'symbol', 'apy_str', 'tvl_str', 'risk', 'type']],
         use_container_width=True,
         column_config={
             "chain": "Chain",
             "project": "Protocol",
             "symbol": "Token",
-            "apy": "APY",
-            "tvl": "TVL",
+            "apy_str": "APY",
+            "tvl_str": "TVL",
             "risk": "Risk",
             "type": "Type"
         }
@@ -129,12 +164,12 @@ def render_opportunity_table(opps_list, category_name: str, allow_invest=True):
     # Expandable cards for investment
     if allow_invest:
         for i, opp in enumerate(filtered_df.to_dict('records')):
-            pool_id = safe_get(opp, "pool_id", f"unknown_{i}")
+            pool_id = opp['pool_id']
             card_key = f"{category_name}_{pool_id}"
             with st.expander(f"{opp['project']} ({opp['chain']})", expanded=st.session_state.get('expanded_cards', {}).get(card_key, False)):
-                st.session_state.expanded_cards[card_key] = True
-                st.markdown(f"**Symbol:** {opp['symbol']} | **APY:** {opp['apy']} | **TVL:** {opp['tvl']} | **Risk:** {opp['risk']}")
-                st.markdown(f"[View on DeFiLlama]({safe_get(opp, 'link', '#')}) | [Explorer]({explorer_urls.get(opp['chain'].lower(), '#') + safe_get(opp, 'contract_address', '0x0')})")
+                st.session_state.setdefault('expanded_cards', {})[card_key] = True
+                st.markdown(f"**Symbol:** {opp['symbol']} | **APY:** {opp['apy_str']} | **TVL:** {opp['tvl_str']} | **Risk:** {opp['risk']}")
+                st.markdown(f"[View on DeFiLlama]({opp['link']}) | [Explorer]({explorer_urls.get(opp['chain'].lower(), '#') + opp['contract_address']})")
                 
                 if allow_invest:
                     connected_wallet = get_connected_wallet(st.session_state, chain=opp['chain'].lower())
@@ -161,7 +196,7 @@ def render_opportunity_table(opps_list, category_name: str, allow_invest=True):
                                     token_address,
                                     pool_address,
                                     amount,
-                                    str(connected_wallet.address)  # ensure it's always a string
+                                    str(connected_wallet.address)
                                 )
                                 approve_tx['chainId'] = chain_id
 
@@ -169,202 +204,68 @@ def render_opportunity_table(opps_list, category_name: str, allow_invest=True):
                                     f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>",
                                     unsafe_allow_html=True
                                 )
-                                time.sleep(1)
-                                approve_resp = get_post_message()
-                                if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
-                                    st.success("Approve confirmed!")
-                                else:
-                                    st.error("Approve failed")
-                                    continue
-
-                                # Supply transaction
-                                if 'aave' in protocol:
-                                    supply_tx = build_aave_supply_tx_data(
-                                        opp['chain'].lower(),
-                                        pool_address,
-                                        token_address,
-                                        amount,
-                                        str(connected_wallet.address)
-                                    )
-                                elif 'compound' in protocol:
-                                    supply_tx = build_compound_supply_tx_data(
-                                        opp['chain'].lower(),
-                                        pool_address,
-                                        token_address,
-                                        amount,
-                                        str(connected_wallet.address)
-                                    )
-                                else:
-                                    st.error(f"Unsupported protocol: {protocol}")
-                                    continue
-
-
-                                supply_tx['chainId'] = chain_id
-                                st.markdown(f"<script>performDeFiAction('supply',{json.dumps(supply_tx)});</script>", unsafe_allow_html=True)
-                                time.sleep(1)
-                                response = get_post_message()
-                                if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                                    if confirm_tx(opp['chain'].lower(), response['txHash']):
-                                        position = create_position(opp['chain'].lower(), opp['project'], selected_token, amount, response['txHash'])
-                                        add_position_to_session(st.session_state, position)
-                                        st.success(f"Invested {amount} {selected_token} in {opp['project']}!")
-                                    else:
-                                        st.error("Supply transaction failed")
-                                else:
-                                    st.error("Supply transaction failed")
                             except Exception as e:
-                                logger.error(f"Investment failed for {opp['project']}: {e}")
-                                st.error(f"Investment failed: {str(e)}")
-                            st.rerun()
+                                logger.error(f"Failed to initiate investment for {opp['project']}: {e}")
+                                st.error(f"Failed to initiate investment: {str(e)}")
                     else:
-                        st.warning("Connect wallet to invest.")
+                        st.warning("Please connect a wallet to invest.")
 
-# --- Render Meme Coin Table ---
-def render_meme_table(memes_list, category_name: str):
-    if not memes_list:
-        st.warning(f"No {category_name} opportunities found.")
+# --- Render Meme Table ---
+def render_meme_table(meme_list, category_name: str):
+    if not meme_list:
+        st.warning(f"No {category_name.replace('_', ' ').title()} found.")
         return
 
-    # Convert to DataFrame
-    df = pd.DataFrame(memes_list)
-    df['price'] = df['price'].apply(lambda x: f"${x:.4f}" if pd.notnull(x) else "$0.00")
-    df['liquidity_usd'] = df['liquidity_usd'].apply(format_number)
-    df['volume_24h_usd'] = df['volume_24h_usd'].apply(format_number)
+    # Validate and clean meme data
+    cleaned_memes = []
+    for meme in meme_list:
+        try:
+            chain = safe_get(meme, 'chain', 'unknown')
+            project = safe_get(meme, 'project', 'Unknown')
+            name = safe_get(meme, 'name', 'Unknown')
+            symbol = safe_get(meme, 'symbol', 'Unknown')
+            risk = safe_get(meme, 'risk', 'Unknown')
+            if not all(isinstance(x, str) for x in [chain, project, name, symbol, risk]):
+                logger.warning(f"Skipping meme with invalid string fields: {meme}")
+                continue
+            market_cap = float(safe_get(meme, 'market_cap', 0.0))
+            if market_cap < 0:
+                logger.warning(f"Skipping meme with negative market_cap: {meme}")
+                continue
+
+            cleaned_memes.append({
+                'chain': chain.capitalize(),
+                'project': project,
+                'name': name,
+                'symbol': symbol,
+                'price': safe_get(meme, 'price', 0.0),
+                'market_cap': market_cap,
+                'risk': risk,
+                'growth_potential': safe_get(meme, 'growth_potential', 0.0)
+            })
+        except Exception as e:
+            logger.warning(f"Skipping invalid meme {safe_get(meme, 'project', 'unknown')}: {e}")
+            continue
+
+    if not cleaned_memes:
+        st.warning(f"No valid {category_name.replace('_', ' ').title()} found after validation.")
+        return
+
+    df = pd.DataFrame(cleaned_memes)
     df['market_cap'] = df['market_cap'].apply(format_number)
-    df['change_24h_pct'] = df['change_24h_pct'].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) else "0%")
-    df['chain'] = df['chain'].str.capitalize()
-    df['risk'] = df['risk'].fillna('Unknown')
 
-    # Filtering
-    with st.expander("Filter Meme Coins", expanded=False):
-        chains = st.multiselect("Filter by Chain", options=df['chain'].unique(), default=df['chain'].unique(), key=f"filter_chain_{category_name}")
-        min_volume = st.slider("Minimum 24h Volume ($)", 0, 1000000, 0, key=f"min_volume_{category_name}")
-        risks = st.multiselect("Filter by Risk", options=df['risk'].unique(), default=df['risk'].unique(), key=f"filter_risk_{category_name}")
-        
-        filtered_df = df[
-            (df['chain'].isin(chains)) &
-            (df['volume_24h_usd'].str.replace('$', '').str.replace('K', 'e3').str.replace('M', 'e6').str.replace('B', 'e9').astype(float) >= min_volume) &
-            (df['risk'].isin(risks))
-        ]
-
-    # Display table
     st.dataframe(
-        filtered_df[['chain', 'name', 'symbol', 'price', 'liquidity_usd', 'volume_24h_usd', 'change_24h_pct', 'market_cap', 'risk']],
+        df[['chain', 'project', 'name', 'symbol', 'price', 'market_cap', 'risk', 'growth_potential']],
         use_container_width=True,
         column_config={
             "chain": "Chain",
+            "project": "DEX",
             "name": "Name",
             "symbol": "Symbol",
             "price": "Price",
-            "liquidity_usd": "Liquidity",
-            "volume_24h_usd": "24h Volume",
-            "change_24h_pct": "24h Change",
             "market_cap": "Market Cap",
-            "risk": "Risk"
-        }
-    )
-
-    # Expandable cards for swapping
-    for i, meme in enumerate(filtered_df.to_dict('records')):
-        pool_id = safe_get(meme, "pool_id", f"unknown_{i}")
-        card_key = f"{category_name}_{pool_id}"
-        with st.expander(f"{meme['name']} ({meme['chain']})", expanded=st.session_state.get('expanded_cards', {}).get(card_key, False)):
-            st.session_state.expanded_cards[card_key] = True
-            st.markdown(f"**Symbol:** {meme['symbol']} | **Price:** {meme['price']} | **Liquidity:** {meme['liquidity_usd']} | **24h Change:** {meme['change_24h_pct']}")
-            st.markdown(f"[View on DexScreener]({safe_get(meme, 'url', '#')}) | [Explorer]({explorer_urls.get(meme['chain'].lower(), '#') + safe_get(meme, 'contract_address', '0x0')})")
-            
-            connected_wallet = get_connected_wallet(st.session_state, chain=meme['chain'].lower())
-            if connected_wallet:
-                selected_token = st.selectbox("Select Token to Swap", list(ERC20_TOKENS.keys()), key=f"token_{card_key}")
-                amount = st.number_input("Amount", min_value=0.0, step=0.1, key=f"amount_{card_key}")
-                if st.button("Swap Now", key=f"swap_{card_key}"):
-                    try:
-                        chain_id = CHAIN_IDS.get(meme['chain'].lower(), 1)
-                        token_address = ERC20_TOKENS.get(selected_token, {}).get(meme['chain'].lower(), "0x0")
-                        router_address = CONTRACT_MAP.get('uniswap', {}).get(meme['chain'].lower(), "0x0")
-                        if not router_address or not token_address:
-                            st.error("Invalid router or token address")
-                            continue
-
-                        approve_tx = build_erc20_approve_tx_data(
-                            meme['chain'].lower(),
-                            token_address,
-                            router_address,
-                            amount,
-                            str(connected_wallet.address) if connected_wallet and connected_wallet.address else ""
-                        )
-
-                        approve_tx['chainId'] = chain_id
-                        st.markdown(f"<script>performDeFiAction('approve',{json.dumps(approve_tx)});</script>", unsafe_allow_html=True)
-                        time.sleep(1)
-                        approve_resp = get_post_message()
-                        if approve_resp.get("type") == "streamlit:txSuccess" and isinstance(approve_resp.get("txHash"), str) and approve_resp.get("txHash"):
-                            st.success("Approve confirmed!")
-                        else:
-                            st.error("Approve failed")
-                            continue
-
-                        swap_tx = {
-                            "from": connected_wallet.address,
-                            "to": router_address,
-                            "data": "0x",
-                            "value": 0,
-                            "chainId": chain_id
-                        }
-                        st.markdown(f"<script>performDeFiAction('swap',{json.dumps(swap_tx)});</script>", unsafe_allow_html=True)
-                        time.sleep(1)
-                        swap_resp = get_post_message()
-                        if swap_resp.get("type") == "streamlit:txSuccess" and isinstance(swap_resp.get("txHash"), str) and swap_resp.get("txHash"):
-                            if confirm_tx(meme['chain'].lower(), swap_resp['txHash']):
-                                position = create_position(meme['chain'].lower(), meme['symbol'], selected_token, amount, swap_resp['txHash'])
-                                add_position_to_session(st.session_state, position)
-                                st.success(f"Swapped {amount} {selected_token} for {meme['symbol']}!")
-                            else:
-                                st.error("Swap failed")
-                        else:
-                            st.error("Swap failed")
-                    except Exception as e:
-                        logger.error(f"Swap failed for {meme['symbol']}: {e}")
-                        st.error(f"Swap error: {str(e)}")
-                    st.rerun()
-            else:
-                st.warning("Connect wallet to swap.")
-
-# --- Render ML Table ---
-def render_ml_table(opps_list, category_name: str):
-    if not opps_list:
-        st.warning(f"No {category_name} opportunities found.")
-        return
-
-    df = pd.DataFrame(opps_list)
-    df['apy'] = df['apy'].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) else "0%")
-    df['tvl'] = df['tvl'].apply(format_number)
-    df['chain'] = df['chain'].str.capitalize()
-    df['risk'] = df['risk'].fillna('Unknown')
-    df['final_score'] = df['final_score'].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "0.00")
-    df['predicted_ror'] = df['predicted_ror'].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "0.00")
-
-    # Filtering
-    with st.expander("Filter ML Results", expanded=False):
-        chains = st.multiselect("Filter by Chain", options=df['chain'].unique(), default=df['chain'].unique(), key=f"filter_chain_ml_{category_name}")
-        min_score = st.slider("Minimum Score", 0.0, 1.0, 0.0, key=f"min_score_{category_name}")
-        filtered_df = df[
-            (df['chain'].isin(chains)) &
-            (df['final_score'].astype(float) >= min_score)
-        ]
-
-    st.dataframe(
-        filtered_df[['chain', 'project', 'symbol', 'apy', 'tvl', 'risk', 'final_score', 'predicted_ror']],
-        use_container_width=True,
-        column_config={
-            "chain": "Chain",
-            "project": "Protocol",
-            "symbol": "Token",
-            "apy": "APY",
-            "tvl": "TVL",
             "risk": "Risk",
-            "final_score": "Score",
-            "predicted_ror": "Predicted RoR"
+            "growth_potential": "24h Change"
         }
     )
 
@@ -374,273 +275,145 @@ def render_position_table(positions, data_map, category_name: str):
         st.info(f"No {category_name} positions found.")
         return
 
-    df = pd.DataFrame(positions)
-    df['current_value'] = df.apply(lambda row: row['amount_invested'] * data_map.get(row['id'], {}).get('price', 0.0), axis=1)
-    df['pnl'] = df['current_value'] - df['amount_invested']
-    df['pnl_pct'] = df.apply(lambda row: (row['pnl'] / row['amount_invested'] * 100) if row['amount_invested'] > 0 else 0, axis=1)
-    df['chain'] = df['chain'].str.capitalize()
-    df['gas_fee'] = df['id'].apply(lambda x: data_map.get(x, {}).get('gas_fee', 0.0))
+    cleaned_positions = []
+    for pos in positions:
+        try:
+            chain = safe_get(pos, 'chain', 'unknown')
+            opportunity_name = safe_get(pos, 'opportunity_name', 'Unknown')
+            token_symbol = safe_get(pos, 'token_symbol', 'Unknown')
+            protocol = safe_get(pos, 'protocol', 'Unknown')
+            if not all(isinstance(x, str) for x in [chain, opportunity_name, token_symbol, protocol]):
+                logger.warning(f"Skipping position with invalid string fields: {pos}")
+                continue
+            amount_invested = float(safe_get(pos, 'amount_invested', 0.0))
+            apy = float(safe_get(pos, 'apy', 0.0)) if safe_get(pos, 'apy', None) is not None else None
+            if amount_invested < 0:
+                logger.warning(f"Skipping position with negative amount_invested: {pos}")
+                continue
 
-    # Filtering
-    with st.expander("Filter Positions", expanded=False):
-        chains = st.multiselect("Filter by Chain", options=df['chain'].unique(), default=df['chain'].unique(), key=f"filter_chain_pos_{category_name}")
-        filtered_df = df[df['chain'].isin(chains)]
+            cleaned_positions.append({
+                'chain': chain.capitalize(),
+                'opportunity_name': opportunity_name,
+                'token_symbol': token_symbol,
+                'amount_invested': amount_invested,
+                'apy': apy,
+                'protocol': protocol,
+                'id': safe_get(pos, 'id', f"unknown_{len(cleaned_positions)}"),
+                'status': safe_get(pos, 'status', 'unknown')
+            })
+        except Exception as e:
+            logger.warning(f"Skipping invalid position {safe_get(pos, 'id', 'unknown')}: {e}")
+            continue
 
-    # Display table
+    if not cleaned_positions:
+        st.info(f"No valid {category_name} positions found after validation.")
+        return
+
+    df = pd.DataFrame(cleaned_positions)
+    df['current_value'] = df.apply(
+        lambda row: format_number(
+            row['amount_invested'] * data_map.get(row['id'], {}).get('price', 0.0)
+        ), axis=1
+    )
+    df['apy'] = df['apy'].apply(lambda x: f"{x:.2f}%" if x is not None else "N/A")
+    df['amount_invested'] = df['amount_invested'].apply(format_number)
+
     st.dataframe(
-        filtered_df[['chain', 'project', 'token_symbol', 'amount_invested', 'current_value', 'pnl', 'pnl_pct', 'gas_fee']],
+        df[['chain', 'opportunity_name', 'token_symbol', 'amount_invested', 'current_value', 'apy', 'protocol']],
         use_container_width=True,
         column_config={
             "chain": "Chain",
-            "project": "Protocol",
+            "opportunity_name": "Opportunity",
             "token_symbol": "Token",
             "amount_invested": "Invested",
             "current_value": "Current Value",
-            "pnl": "PnL ($)",
-            "pnl_pct": "PnL (%)",
-            "gas_fee": "Gas Fee ($)"
+            "apy": "APY",
+            "protocol": "Protocol"
         }
     )
 
-    # Expandable cards for closing positions
-    if category_name == "active":
-        for i, pos in enumerate(filtered_df.to_dict('records')):
-            position_id = pos['id']
-            with st.expander(f"{pos['project']} ({pos['chain']})", expanded=st.session_state.get('expanded_cards', {}).get(f"pos_{position_id}", False)):
-                st.session_state.expanded_cards[f"pos_{position_id}"] = True
-                st.markdown(f"**Token:** {pos['token_symbol']} | **Invested:** {pos['amount_invested']:.2f} | **PnL:** {pos['pnl']:.2f} ({pos['pnl_pct']:.2f}%)")
-                st.markdown(f"[View Transaction]({explorer_urls.get(pos['chain'].lower(), '#') + pos['tx_hash']})")
-                
-                connected_wallet = get_connected_wallet(st.session_state, chain=pos['chain'].lower())
-                if connected_wallet and st.button("Close Position", key=f"close_{position_id}"):
+    for pos in cleaned_positions:
+        position_id = pos['id']
+        with st.expander(f"{pos['opportunity_name']} ({pos['chain']})"):
+            st.markdown(f"**Token:** {pos['token_symbol']} | **Invested:** {format_number(pos['amount_invested'])} | **APY:** {pos['apy']}")
+            if pos['status'] == 'active':
+                amount = st.number_input("Amount to Withdraw", min_value=0.0, step=0.1, key=f"withdraw_amount_{position_id}")
+                if st.button("Withdraw", key=f"withdraw_{position_id}"):
                     try:
-                        protocol = pos['project'].lower()
-                        chain_id = CHAIN_IDS.get(pos['chain'].lower(), 1)
-                        pool_address = CONTRACT_MAP.get(protocol, {}).get(pos['chain'].lower(), "0x0")
-                        token_address = ERC20_TOKENS.get(pos['token_symbol'], {}).get(pos['chain'].lower(), "0x0")
-                        amount = pos['amount_invested']
+                        chain = pos['chain'].lower()
+                        protocol = pos['protocol'].lower()
+                        pool_address = CONTRACT_MAP.get(protocol, {}).get(chain, "0x0")
+                        token_address = ERC20_TOKENS.get(pos['token_symbol'], {}).get(chain, "0x0")
+                        wallet_address = safe_get(pos, 'wallet_address', '')
+
                         if not pool_address or not token_address:
                             st.error("Invalid pool or token address")
                             continue
 
-                        if not connected_wallet or not connected_wallet.address:
-                            st.error("No connected wallet. Please connect your wallet first.")
-                            continue
-
-                        if 'aave' in protocol:
-                            withdraw_tx = build_aave_withdraw_tx_data(
-                                pos['chain'].lower(),
-                                pool_address,
-                                token_address,
-                                amount,
-                                str(connected_wallet.address)
-                            )
-                        elif 'compound' in protocol:
-                            withdraw_tx = build_compound_withdraw_tx_data(
-                                pos['chain'].lower(),
-                                pool_address,
-                                token_address,
-                                amount,
-                                str(connected_wallet.address)
-                            )
+                        if protocol == 'aave':
+                            withdraw_tx = build_aave_withdraw_tx_data(chain, pool_address, token_address, amount, wallet_address)
+                        elif protocol == 'compound':
+                            withdraw_tx = build_compound_withdraw_tx_data(chain, pool_address, token_address, amount, wallet_address)
                         else:
                             st.error(f"Unsupported protocol: {protocol}")
                             continue
 
-
-                        withdraw_tx['chainId'] = chain_id
-                        st.markdown(f"<script>performDeFiAction('withdraw',{json.dumps(withdraw_tx)});</script>", unsafe_allow_html=True)
-                        time.sleep(1)
-                        response = get_post_message()
-                        if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                            if confirm_tx(pos['chain'].lower(), response['txHash']):
-                                close_position(st.session_state, position_id, response['txHash'])
-                                st.success(f"Closed position for {amount} {pos['token_symbol']} in {pos['project']}!")
-                            else:
-                                st.error("Withdraw transaction failed")
-                        else:
-                            st.error("Withdraw transaction failed")
+                        withdraw_tx['chainId'] = CHAIN_IDS.get(chain, 1)
+                        st.markdown(
+                            f"<script>performDeFiAction('withdraw',{json.dumps(withdraw_tx)});</script>",
+                            unsafe_allow_html=True
+                        )
                     except Exception as e:
-                        logger.error(f"Failed to close position {position_id}: {e}")
-                        st.error(f"Failed to close position: {str(e)}")
-                    st.rerun()
+                        logger.error(f"Failed to initiate withdrawal for {position_id}: {e}")
+                        st.error(f"Failed to initiate withdrawal: {str(e)}")
 
 # --- Render Wallets ---
 def render_wallets():
-    if 'wallets' not in st.session_state:
-        init_wallets(st.session_state)
+    wallets = st.session_state.get('wallets', [])
+    if not wallets:
+        st.info("No wallets connected.")
+        return
 
-    st.markdown(
-        """
-        <style>
-            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            .connect-button { background: linear-gradient(to right, #6366f1, #3b82f6); border: none; padding: 12px 24px; border-radius: 10px; color: white; font-size: 16px; cursor: pointer; }
-            .text-green-400 { color: #10B981; }
-            .text-red-400 { color: #EF4444; }
-        </style>
-        <script src="https://unpkg.com/@walletconnect/modal@2.6.2/dist/index.umd.js"></script>
-        <script src="https://cdn.ethers.io/lib/ethers-5.7.umd.min.js"></script>
-        <button id="connectButton" class="connect-button">🔗 Connect Wallet</button>
-        <script>
-            const modal = new window.WalletConnectModal.default({
-                projectId: 'bbfc8335f232745db239ec392b6a9d4a',
-                chains: ['eip155:1', 'eip155:56', 'eip155:42161', 'eip155:10', 'eip155:8453', 'eip155:43114', 'eip155:245022926'],
-            });
-            async function connectWallet() {
-                if (window.ethereum) {
-                    try {
-                        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-                        window.lastMessage = { type: 'streamlit:connect', account: accounts[0], chainId: await window.ethereum.request({ method: 'eth_chainId' }) };
-                    } catch (e) {
-                        window.lastMessage = { type: 'streamlit:error', message: e.message };
-                    }
-                } else {
-                    try {
-                        const uri = await modal.openModal();
-                        modal.on('connect', (result) => {
-                            window.lastMessage = { type: 'streamlit:connect', account: result.accounts[0], chainId: result.chainId };
-                        });
-                    } catch (e) {
-                        window.lastMessage = { type: 'streamlit:error', message: e.message };
-                    }
-                }
-            }
-            document.getElementById('connectButton').addEventListener('click', connectWallet);
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+    for wallet in wallets:
+        chain = safe_get(wallet, 'chain', 'unknown')
+        if not isinstance(chain, str):
+            chain = 'unknown'
+        address = safe_get(wallet, 'address', '0x0')
+        balance = float(safe_get(wallet, 'balance', 0.0))
+        connected = safe_get(wallet, 'connected', False)
+        logo = NETWORK_LOGOS.get(chain.lower(), '')
+        status = "Connected" if connected else "Disconnected"
 
-    tab_connected, tab_disconnected = st.tabs(["🟢 Connected Wallets", "🔴 Disconnected Wallets"])
-
-    with tab_connected:
-        connected_wallets = [w for w in st.session_state.wallets.values() if w.connected]
-        if not connected_wallets:
-            st.info("No connected wallets.")
-        else:
-            for wallet in connected_wallets:
-                chain = wallet.chain
-                logo_url = NETWORK_LOGOS.get(chain, "https://via.placeholder.com/32?text=Logo")
-                chain_name = chain.capitalize()
-                address = wallet.address
-                address_display = (address[:6] + "..." + address[-4:]) if address else "Not connected"
-                balance = wallet.get_balance() if hasattr(wallet, 'get_balance') else 0.0
-                balance_display = f"{balance:.2f} {chain.upper()}"
-
-                st.markdown(
-                    f"""
-                    <div class="card">
-                        <div style="display:flex; align-items:center; margin-bottom:0.75rem;">
-                            <img src="{logo_url}" alt="{chain_name}" style="width:32px; height:32px; border-radius:50%; margin-right:0.6rem;">
-                            <h3 style="margin:0; font-size:1rem; font-weight:600; color:#c7d2fe;">{chain_name}</h3>
-                        </div>
-                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">Status: <span class="text-green-400">✅ Connected</span></p>
-                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">Address: {address_display}</p>
-                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">Balance: {balance_display}</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                if st.button("Disconnect", key=f"disconnect_{chain}"):
-                    wallet.disconnect()
-                    st.rerun()
-
-    with tab_disconnected:
-        disconnected_wallets = [w for w in st.session_state.wallets.values() if not w.connected]
-        if not disconnected_wallets:
-            st.info("No disconnected wallets.")
-        else:
-            for wallet in disconnected_wallets:
-                chain = wallet.chain
-                logo_url = NETWORK_LOGOS.get(chain, "https://via.placeholder.com/32?text=Logo")
-                chain_name = chain.capitalize()
-                address = wallet.address
-                address_display = (address[:6] + "..." + address[-4:]) if address else "Not connected"
-
-                st.markdown(
-                    f"""
-                    <div class="card">
-                        <div style="display:flex; align-items:center; margin-bottom:0.75rem;">
-                            <img src="{logo_url}" alt="{chain_name}" style="width:32px; height:32px; border-radius:50%; margin-right:0.6rem;">
-                            <h3 style="margin:0; font-size:1rem; font-weight:600; color:#c7d2fe;">{chain_name}</h3>
-                        </div>
-                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">Status: <span class="text-red-400">❌ Disconnected</span></p>
-                        <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">Address: {address_display}</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                address_input = st.text_input("Enter Wallet Address to Connect", key=f"addr_{chain}")
-                if st.button("Connect", key=f"connect_{chain}"):
-                    try:
-                        wallet.connect(address_input)
-                        st.success("Wallet connected.")
-                        st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
+        st.markdown(
+            f"""
+            <div class="card">
+                <img src="{logo}" width="24" style="vertical-align: middle; margin-right: 8px;">
+                <span style="font-weight: bold;">{chain.capitalize()}</span> | {address[:6]}...{address[-4:]} | {format_number(balance)} | {status}
+                {'<button onclick="connectWallet()">Reconnect</button>' if not connected else ''}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 # --- Main Render Function ---
 def render():
-    st.markdown(
-        """
-        <style>
-            .header { background: linear-gradient(135deg, #1e1e2f, #312e81); padding: 2rem; border-radius: 12px; text-align: center; }
-            .header h1 { color: #c7d2fe; font-size: 2.5rem; font-weight: bold; }
-            .header p { color: #e0e7ff; font-size: 1rem; }
-        </style>
-        <div class="header">
-            <h1>🌟 DeFiVaultPro Dashboard</h1>
-            <p>Explore top DeFi opportunities, track your positions, and manage wallets with ease.</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    if 'wallets' not in st.session_state:
-        init_wallets(st.session_state)
-    if 'positions' not in st.session_state:
-        st.session_state.positions = db.get_positions()
     if 'expanded_cards' not in st.session_state:
         st.session_state.expanded_cards = {}
 
-    tab_opportunities, tab_positions, tab_wallets = st.tabs(["🌐 Opportunities", "📊 My Positions", "👛 Wallets"])
+    tab_yields, tab_positions, tab_wallets = st.tabs(["📈 Yield Opportunities", "💼 My Positions", "👛 Wallets"])
 
-    with tab_opportunities:
-        sub_tab1, sub_tab2, sub_tab3, sub_tab4, sub_tab5 = st.tabs(
-            ["🏆 Top Picks", "⚡ Short-Term", "🏛 Long-Term", "🚀 Layer 2", "🐸 Meme Coins"]
-        )
+    with tab_yields:
+        sub_tab1, sub_tab2, sub_tab3, sub_tab4, sub_tab5 = st.tabs([
+            "🏆 Top Picks",
+            "⚡ Short Term",
+            "🏦 Long Term",
+            "🚀 Layer 2",
+            "🐸 Meme Coins"
+        ])
 
         with sub_tab1:
-            st.markdown("### Curated DeFi Opportunities")
-            st.write("Balanced risk-reward opportunities enhanced by ML insights.")
-            if st.button("Run ML Analysis", key="ml_analysis"):
-                try:
-                    result = subprocess.run(["python", "ml.py"], capture_output=True, text=True)
-                    if result.returncode == 0:
-                        st.success("ML Analysis completed! Refreshing...")
-                        st.rerun()
-                    else:
-                        st.error(f"ML Analysis failed: {result.stderr}")
-                except Exception as e:
-                    logger.error(f"Failed to run ML analysis: {e}")
-                    st.error(f"Failed to run ML analysis: {e}")
-
-            try:
-                with open("defi_scan_results_enhanced.json", "r") as f:
-                    data = json.load(f)
-            except FileNotFoundError:
-                data = {"yields": [], "memes": []}
-
-            st.subheader("🏆 ML-Enhanced Yields")
-            render_ml_table(data.get("yields", []), "ml_yields")
-            st.subheader("🐸 ML-Enhanced Meme Coins")
-            render_ml_table(data.get("memes", []), "ml_memes")
-
-            @st.cache_data(ttl=300)
-            def cached_top_picks():
-                return db.get_opportunities(limit=100)
             with st.spinner("🔍 Scanning for top DeFi opportunities..."):
-                top_picks = cached_top_picks()
+                top_picks = db.get_opportunities(limit=100)
                 render_opportunity_table(top_picks, "top_picks")
 
             st.markdown(
@@ -654,12 +427,9 @@ def render():
             )
 
         with sub_tab2:
-            @st.cache_data(ttl=300)
-            def cached_short_term():
-                all_opps = db.get_opportunities(limit=100)
-                return [opp for opp in all_opps if safe_get(opp, 'apy', 0) > 20]
             with st.spinner("🔍 Scanning for short-term DeFi opportunities..."):
-                short_term_opps = cached_short_term()
+                all_opps = db.get_opportunities(limit=100)
+                short_term_opps = [opp for opp in all_opps if float(safe_get(opp, 'apy', 0.0)) > 20]
                 render_opportunity_table(short_term_opps, "short_term")
             st.markdown(
                 """
@@ -672,12 +442,9 @@ def render():
             )
 
         with sub_tab3:
-            @st.cache_data(ttl=300)
-            def cached_long_term():
-                all_opps = db.get_opportunities(limit=100)
-                return [opp for opp in all_opps if safe_get(opp, 'risk', 'Unknown') == 'Low' or safe_get(opp, 'tvl', 0) > 1_000_000]
             with st.spinner("🔍 Scanning for long-term DeFi opportunities..."):
-                long_term_opps = cached_long_term()
+                all_opps = db.get_opportunities(limit=100)
+                long_term_opps = [opp for opp in all_opps if safe_get(opp, 'risk', 'Unknown') == 'Low' or float(safe_get(opp, 'tvl', 0.0)) > 1_000_000]
                 render_opportunity_table(long_term_opps, "long_term")
             st.markdown(
                 """
@@ -699,21 +466,14 @@ def render():
                 format_func=lambda x: f"⚡ {x.capitalize()}" if x in LAYER2_CHAINS else x.capitalize(),
                 key="layer2_chains"
             )
-            @st.cache_data(ttl=300)
-            def cached_layer2_opps():
-                all_opps = db.get_opportunities(limit=100)
-                return [o for o in all_opps if safe_get(o, 'chain', 'unknown').lower() in LAYER2_CHAINS]
             with st.spinner("🔍 Scanning for Layer 2 opportunities..."):
-                layer2_opps = cached_layer2_opps()
-                layer2_opps = [o for o in layer2_opps if safe_get(o, 'chain', 'unknown').lower() in selected_chains]
+                all_opps = db.get_opportunities(limit=100)
+                layer2_opps = [opp for opp in all_opps if safe_get(opp, 'chain', 'unknown').lower() in selected_chains]
                 render_opportunity_table(layer2_opps, "layer2_focus")
 
         with sub_tab5:
-            @st.cache_data(ttl=300)
-            def cached_meme_coins():
-                return db.get_meme_opportunities(limit=100)
             with st.spinner("🔍 Scanning for trending meme coins..."):
-                meme_coins = cached_meme_coins()
+                meme_coins = db.get_meme_opportunities(limit=100)
                 render_meme_table(meme_coins, "meme_coins")
             st.markdown(
                 """
@@ -726,22 +486,25 @@ def render():
             )
 
     with tab_positions:
-        active_positions = [p for p in st.session_state.positions if safe_get(p, "status", "") == "active"]
-        closed_positions = [p for p in st.session_state.positions if safe_get(p, "status", "") == "closed"]
+        active_positions = [p for p in st.session_state.get('positions', []) if safe_get(p, "status", "") == "active"]
+        closed_positions = [p for p in st.session_state.get('positions', []) if safe_get(p, "status", "") == "closed"]
         data_map = {}
         for pos in active_positions + closed_positions:
             position_id = safe_get(pos, "id", f"unknown_{pos.get('chain', 'unknown')}")
             try:
-                price = get_token_price(safe_get(pos, "token_symbol", "Unknown"))
+                token_symbol = safe_get(pos, "token_symbol", "Unknown")
+                if not isinstance(token_symbol, str):
+                    token_symbol = "Unknown"
+                price = get_token_price(token_symbol)
                 gas_fee = 0.01  # Placeholder; assume wallet_utils provides accurate gas estimation
                 data_map[position_id] = {"price": price, "gas_fee": gas_fee}
             except Exception as e:
                 logger.warning(f"Failed to fetch price/gas for {position_id}: {e}")
                 data_map[position_id] = {"price": 0.0, "gas_fee": 0.0}
 
-        total_invested = sum(safe_get(pos, "amount_invested", 0) for pos in active_positions)
+        total_invested = sum(float(safe_get(pos, "amount_invested", 0.0)) for pos in active_positions)
         total_current_value = sum(
-            safe_get(pos, "amount_invested", 0) * data_map.get(safe_get(pos, "id", ""), {}).get("price", 0.0)
+            float(safe_get(pos, "amount_invested", 0.0)) * data_map.get(safe_get(pos, "id", ""), {}).get("price", 0.0)
             for pos in active_positions
         )
         total_pnl = total_current_value - total_invested

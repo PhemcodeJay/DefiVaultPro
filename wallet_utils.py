@@ -270,10 +270,13 @@ def init_wallets(session_state):
             wallet.balance = db_wallet['balance']
             wallet.nonce = db_wallet['nonce']
 
-def get_connected_wallet(session_state, chain: str) -> Optional[Wallet]:
+def get_connected_wallet(session_state, chain: Optional[str] = None):
     if 'wallets' not in session_state:
-        init_wallets(session_state)
-    return session_state.wallets.get(chain.lower())
+        return None
+    wallets = session_state.wallets
+    if chain:
+        return wallets.get(chain.lower()) if wallets.get(chain.lower(), {}).get('connected') else None
+    return next((w for w in wallets.values() if w.connected), None)
 
 def get_all_wallets(session_state) -> List[Wallet]:
     if 'wallets' not in session_state:

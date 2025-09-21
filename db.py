@@ -292,19 +292,7 @@ def save_meme_opportunities(meme_data: List[Dict[str, Any]]) -> bool:
         logger.error(f"Failed to save meme opportunities: {e}")
         return False
 
-# ----------------------------- Retrieval -----------------------------
-def get_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-    try:
-        with get_db_session() as session:
-            query = session.query(Opportunity).filter_by(is_active=True)
-            if chain:
-                query = query.filter_by(chain=chain)
-            opps = query.order_by(Opportunity.tvl.desc()).limit(limit).all()
-            return [o.__dict__ for o in opps]
-    except Exception as e:
-        logger.error(f"Failed to get opportunities: {e}")
-        return []
-
+# ----------------------------- Retrieval ----------------------------
 def get_meme_opportunities(chain: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
     try:
         with get_db_session() as session:
@@ -426,10 +414,34 @@ def close_position(position_id: str, tx_hash: Optional[str] = None) -> bool:
         logger.error(f"Failed to close position {position_id}: {e}")
         return False
 
-def get_positions(limit: int = 50) -> List[Dict[str, Any]]:
+def get_opportunities(limit: int = 100) -> List[Dict[str, Any]]:
     try:
         with get_db_session() as session:
-            positions = session.query(Position).order_by(Position.entry_date.desc()).limit(limit).all()
+            opps = session.query(Opportunity).filter(
+                Opportunity.chain.isnot(None),
+                Opportunity.project.isnot(None),
+                Opportunity.symbol.isnot(None),
+                Opportunity.protocol.isnot(None),
+                Opportunity.apy >= 0,
+                Opportunity.tvl >= 0
+            ).limit(limit).all()
+            return [o.__dict__ for o in opps]
+    except Exception as e:
+        logger.error(f"Failed to get opportunities: {e}")
+        return []
+
+def get_positions() -> List[Dict[str, Any]]:
+    try:
+        with get_db_session() as session:
+            positions = session.query(Position).filter(
+                Position.chain.isnot(None),
+                Position.opportunity_name.isnot(None),
+                Position.token_symbol.isnot(None),
+                Position.protocol.isnot(None),
+                Position.status.in_(["active", "closed", "pending"]),
+                Position.amount_invested >= 0,
+                Position.apy >= 0
+            ).all()
             return [p.__dict__ for p in positions]
     except Exception as e:
         logger.error(f"Failed to get positions: {e}")

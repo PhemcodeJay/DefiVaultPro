@@ -2,7 +2,7 @@ import json
 import time
 import streamlit as st
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, List
 import db
 import requests
 from views.layer2_focus import get_post_message
@@ -18,6 +18,7 @@ from wallet_utils import (
 from config import NETWORK_LOGOS, NETWORK_NAMES, PROTOCOL_LOGOS, BALANCE_SYMBOLS, CHAIN_IDS, CONTRACT_MAP, ERC20_TOKENS, explorer_urls
 from streamlit_javascript import st_javascript
 import logging
+from utils import safe_get, format_number
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -33,16 +34,24 @@ logger = logging.getLogger(__name__)
 async def async_get_current_token_price(token_symbol: str, chain: str) -> float:
     """Fetch token price safely in a thread."""
     try:
-        return await asyncio.to_thread(get_token_price, token_symbol)
+        if not isinstance(token_symbol, str) or not isinstance(chain, str):
+            logger.warning(f"Invalid token_symbol or chain: {token_symbol}, {chain}")
+            return 0.0
+        price = await asyncio.to_thread(get_token_price, token_symbol)
+        return float(price) if isinstance(price, (int, float, str)) and float(price) >= 0 else 0.0
     except Exception as e:
-        st.warning(f"Failed to fetch price for {token_symbol} on {chain}: {e}")
+        logger.warning(f"Failed to fetch price for {token_symbol} on {chain}: {e}")
         return 0.0
 
 async def async_get_chain_gas_fee(chain: str) -> float:
     """Estimate chain gas fee in USD."""
     try:
-        w3 = connect_to_chain(chain)
+        if not isinstance(chain, str):
+            logger.warning(f"Invalid chain: {chain}")
+            return 0.0
+        w3 = connect_to_chain(chain.lower())
         if not w3:
+            logger.warning(f"No Web3 connection for chain: {chain}")
             return 0.0
         gas_price = w3.eth.gas_price
         gas_estimate = 200_000  # Standard for DeFi tx
@@ -62,15 +71,17 @@ async def async_get_chain_gas_fee(chain: str) -> float:
                 timeout=10,
             ).json()
         )
-        token_price = data.get(native_token, {}).get("usd", 2000.0)
+        token_price = float(safe_get(data, native_token, {}).get("usd", 2000.0))
         gas_fee_native = w3.from_wei(gas_price * gas_estimate, "ether")
-        return float(gas_fee_native) * token_price
+        return float(gas_fee_native) * token_price if isinstance(gas_fee_native, (int, float)) else 0.0
     except Exception as e:
-        st.warning(f"Failed to fetch gas fee for {chain}: {e}")
+        logger.warning(f"Failed to fetch gas fee for {chain}: {e}")
         return 0.0
 
-async def fetch_positions_data(positions):
+async def fetch_positions_data(positions: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
     """Fetch all prices and gas fees concurrently."""
+    if not positions:
+        return {}
     price_tasks = [
         async_get_current_token_price(pos["token_symbol"], pos["chain"])
         for pos in positions
@@ -78,137 +89,155 @@ async def fetch_positions_data(positions):
     gas_tasks = [async_get_chain_gas_fee(pos["chain"]) for pos in positions]
     prices = await asyncio.gather(*price_tasks, return_exceptions=True)
     gas_fees = await asyncio.gather(*gas_tasks, return_exceptions=True)
-    return {
-        pos["id"]: {
-            "price": prices if isinstance(prices, float) else 0.0,
-            "gas_fee": gas_fees if isinstance(gas_fees, float) else 0.0,
-        }
-        for pos in positions
-    }
+    data_map = {}
+    for i, pos in enumerate(positions):
+        price = prices[i]
+        gas_fee = gas_fees[i]
+        price_value = 0.0
+        gas_fee_value = 0.0
+        if not isinstance(price, Exception):
+            try:
+                price_value = float(price) if isinstance(price, (int, float)) else 0.0
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid price for position {pos['id']}: {e}")
+        if not isinstance(gas_fee, Exception):
+            try:
+                gas_fee_value = float(gas_fee) if isinstance(gas_fee, (int, float)) else 0.0
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid gas fee for position {pos['id']}: {e}")
+        data_map[pos["id"]] = {"price": price_value, "gas_fee": gas_fee_value}
+    return data_map
 
 # --- Render Position Cards ---
-def render_position_cards(positions, data_map, status_type: str):
+def render_position_cards(positions, data_map, status: str):
     if not positions:
-        st.info(f"No {status_type} positions found.")
+        st.info(f"No {status} positions found.")
         return
-
-    # Pagination
-    items_per_page = 5
-    total_pages = (len(positions) + items_per_page - 1) // items_per_page
-    current_page = st.number_input(f"{status_type.capitalize()} Page", min_value=1, max_value=total_pages, value=1, key=f"page_{status_type}")
-    start_idx = (current_page - 1) * items_per_page
-    end_idx = start_idx + items_per_page
-    paginated_positions = positions[start_idx:end_idx]
 
     st.markdown(
         """
         <style>
-            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .card { background: #1e1e2f; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
             .text-green-400 { color: #10B981; }
             .text-red-400 { color: #EF4444; }
         </style>
-        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;'>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         """,
         unsafe_allow_html=True,
     )
 
-    for pos in paginated_positions:
-        chain = pos.get("chain", "unknown").capitalize()
-        protocol = pos.get("protocol", "unknown").lower()
-        opportunity = pos.get("opportunity_name", "Unknown")
-        symbol = pos.get("token_symbol", "Unknown")
-        invested = pos.get("amount_invested", 0.0)
-        tx_hash = pos.get("tx_hash", "No Tx")
-        entry_date = pos.get("entry_date", "Unknown")
-        exit_date = pos.get("exit_date", "Active") if status_type == "closed" else "Active"
-        apy = pos.get("apy", 0.0)
+    for pos in positions:
+        try:
+            chain = safe_get(pos, "chain", "unknown")
+            opportunity_name = safe_get(pos, "opportunity_name", "Unknown")
+            token_symbol = safe_get(pos, "token_symbol", "Unknown")
+            protocol = safe_get(pos, "protocol", "Unknown")
+            tx_hash = safe_get(pos, "tx_hash", "#")
+            if not all(isinstance(x, str) for x in [chain, opportunity_name, token_symbol, protocol, tx_hash]):
+                logger.warning(f"Skipping position with invalid string fields: {pos}")
+                continue
+            amount_invested = float(safe_get(pos, "amount_invested", 0.0))
+            apy = float(safe_get(pos, "apy", 0.0))
+            if amount_invested < 0 or apy < 0:
+                logger.warning(f"Skipping position with negative amount_invested/apy: {pos}")
+                continue
 
-        data = data_map.get(pos["id"], {})
-        price = data.get("price", 0.0)
-        gas_fee = data.get("gas_fee", 0.0)
-        current_value = invested * price
-        pnl = current_value - invested
-        pnl_pct = (pnl / invested * 100) if invested > 0 else 0
+            position_id = pos["id"]
+            price = float(safe_get(data_map.get(position_id, {}), "price", 0.0))
+            gas_fee = float(safe_get(data_map.get(position_id, {}), "gas_fee", 0.0))
+            current_value = amount_invested * price
+            pnl = current_value - amount_invested
+            pnl_pct = (pnl / amount_invested * 100) if amount_invested > 0 else 0.0
+            explorer_url = explorer_urls.get(chain.lower(), "#") + tx_hash
 
-        logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
-        protocol_logo = PROTOCOL_LOGOS.get(protocol, "https://via.placeholder.com/32?text=Protocol")
-        explorer_url = explorer_urls.get(chain.lower(), "#") + tx_hash if tx_hash != "No Tx" else "#"
+            logo_url = NETWORK_LOGOS.get(chain.lower(), "https://via.placeholder.com/32?text=Logo")
+            protocol_logo = PROTOCOL_LOGOS.get(protocol.lower(), "https://via.placeholder.com/32?text=Protocol")
 
-        st.markdown(
-            f"""
-            <div class="card">
-                <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;'>
-                    <div style='display:flex;align-items:center;'>
-                        <img src="{logo_url}" alt="{chain}" style="width:24px;height:24px;border-radius:50%;margin-right:0.5rem;">
-                        <h3 style='margin:0;font-size:1rem;font-weight:600;color:#c7d2fe;'>{opportunity}</h3>
+            st.markdown(
+                f"""
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                        <div style="display:flex; align-items:center;">
+                            <img src="{logo_url}" alt="{chain}" style="width:24px; height:24px; border-radius:50%; margin-right:0.6rem;">
+                            <h3 style="margin:0; font-size:1rem; font-weight:600; color:#c7d2fe;">
+                                {opportunity_name}
+                            </h3>
+                        </div>
+                        <img src="{protocol_logo}" alt="{protocol}" style="width:24px; height:24px; border-radius:50%;">
                     </div>
-                    <img src="{protocol_logo}" alt="{protocol.capitalize()}" style="width:24px;height:24px;border-radius:50%;">
+                    <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                        Chain: {chain.capitalize()} | Token: {token_symbol}
+                    </p>
+                    <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                        Amount: {format_number(amount_invested)}
+                    </p>
+                    <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                        Current Value: {format_number(current_value)}
+                    </p>
+                    <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                        PnL: <span class="{'text-green-400' if pnl >= 0 else 'text-red-400'}">{format_number(pnl)} ({pnl_pct:.2f}%)</span>
+                    </p>
+                    <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                        APY: {apy:.2f}%
+                    </p>
+                    <p style="color:#e0e7ff; font-size:0.9rem; margin-bottom:0.25rem;">
+                        Gas to Exit: {format_number(gas_fee)}
+                    </p>
+                    <a href="{explorer_url}" target="_blank" style="color:#6366f1; text-decoration:none;">View Transaction ↗</a>
                 </div>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    Chain: {chain} | Protocol: {protocol.capitalize()}
-                </p>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    Invested: {invested:.2f} {symbol} (${invested * price:.2f})
-                </p>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    Current Value: ${current_value:.2f}
-                </p>
-                <p class="{'text-green-400' if pnl >= 0 else 'text-red-400'}" style='font-size:0.9rem;margin-bottom:0.25rem;'>
-                    PnL: ${pnl:.2f} ({pnl_pct:.2f}%)
-                </p>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    APY: {apy:.2f}% | Gas to Close: ${gas_fee:.2f}
-                </p>
-                <p style='color:#e0e7ff;font-size:0.9rem;margin-bottom:0.25rem;'>
-                    Entry: {entry_date} | Exit: {exit_date}
-                </p>
-                <a href="{explorer_url}" target="_blank" style='color:#6366f1;text-decoration:none;font-size:0.9rem;'>
-                    View Tx on Explorer ↗
-                </a>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
 
-        if status_type == "active":
-            with st.container():
-                if st.button("Close Position", key=f"close_{pos['id']}"):
-                    connected_wallet = get_connected_wallet(st.session_state, chain.lower())
-                    if not connected_wallet:
-                        st.error(f"No connected wallet for {chain}.")
-                    else:
+            if status == "active":
+                connected_wallet = get_connected_wallet(st.session_state, chain=chain.lower())
+                if connected_wallet and connected_wallet.address:
+                    if st.button("Close Position", key=f"close_{position_id}"):
                         try:
-                            protocol = protocol.lower()
-                            token_address = pos.get("token_address")
-                            pool_address = CONTRACT_MAP.get(protocol, {}).get(chain.lower())
+                            pool_address = CONTRACT_MAP.get(protocol.lower(), {}).get(chain.lower(), "0x0")
+                            token_address = ERC20_TOKENS.get(token_symbol, {}).get(chain.lower(), "0x0")
                             if not pool_address or not token_address:
                                 st.error("Invalid pool or token address")
-                            else:
-                                if 'aave' in protocol:
-                                    withdraw_tx = build_aave_withdraw_tx_data(chain.lower(), token_address, invested, connected_wallet.address) # type: ignore
-                                elif 'compound' in protocol:
-                                    withdraw_tx = build_compound_withdraw_tx_data(chain.lower(), token_address, invested, connected_wallet.address) # type: ignore
-                                else:
-                                    st.error(f"Unsupported protocol: {protocol}")
-                                    continue
+                                continue
 
-                                withdraw_tx['chainId'] = CHAIN_IDS.get(chain.lower(), 0)
-                                st.markdown(f"<script>performDeFiAction('withdraw',{json.dumps(withdraw_tx)});</script>", unsafe_allow_html=True)
-                                time.sleep(1)
-                                response = get_post_message()
-                                if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
-                                    if confirm_tx(chain.lower(), response['txHash']):
-                                        if close_position(st.session_state, pos["id"], response['txHash']):
-                                            st.success("Position closed successfully.")
-                                            st.rerun()
-                                        else:
-                                            st.error("Failed to close position.")
+                            if 'aave' in protocol.lower():
+                                withdraw_tx = build_aave_withdraw_tx_data(
+                                    chain.lower(), pool_address, token_address, amount_invested, str(connected_wallet.address)
+                                )
+                            elif 'compound' in protocol.lower():
+                                withdraw_tx = build_compound_withdraw_tx_data(
+                                    chain.lower(), pool_address, token_address, amount_invested, str(connected_wallet.address)
+                                )
+                            else:
+                                st.error(f"Unsupported protocol: {protocol}")
+                                continue
+
+                            withdraw_tx['chainId'] = CHAIN_IDS.get(chain.lower(), 1)
+                            st.markdown(
+                                f"<script>performDeFiAction('withdraw',{json.dumps(withdraw_tx)});</script>",
+                                unsafe_allow_html=True
+                            )
+                            time.sleep(1)
+                            response = get_post_message()
+                            if response.get("type") == "streamlit:txSuccess" and isinstance(response.get("txHash"), str) and response.get("txHash"):
+                                if confirm_tx(chain.lower(), response['txHash']):
+                                    if close_position(st.session_state, position_id, response['txHash']):
+                                        st.success(f"Position {position_id} closed successfully!")
                                     else:
-                                        st.error("Transaction confirmation failed.")
+                                        st.error("Failed to close position")
                                 else:
-                                    st.error("Withdraw transaction failed.")
+                                    st.error("Withdraw transaction failed")
+                            else:
+                                st.error("Withdraw transaction failed")
+                            st.rerun()
                         except Exception as e:
+                            logger.error(f"Failed to close position {position_id}: {e}")
                             st.error(f"Failed to close position: {str(e)}")
+                else:
+                    st.warning(f"Connect wallet to close position on {chain}.")
+        except Exception as e:
+            logger.warning(f"Error rendering position {safe_get(pos, 'id', 'unknown')}: {e}")
+            continue
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -220,19 +249,57 @@ def render():
     if "positions" not in st.session_state:
         st.session_state.positions = db.get_positions()
 
-    active_positions = [p for p in st.session_state.positions if p["status"] == "active"]
-    closed_positions = [p for p in st.session_state.positions if p["status"] == "closed"]
+    # Validate and clean positions
+    cleaned_positions = []
+    for pos in st.session_state.positions:
+        try:
+            chain = safe_get(pos, "chain", "unknown")
+            opportunity_name = safe_get(pos, "opportunity_name", "Unknown")
+            token_symbol = safe_get(pos, "token_symbol", "Unknown")
+            protocol = safe_get(pos, "protocol", "Unknown")
+            status = safe_get(pos, "status", "unknown")
+            tx_hash = safe_get(pos, "tx_hash", "#")
+            if not all(isinstance(x, str) for x in [chain, opportunity_name, token_symbol, protocol, status, tx_hash]):
+                logger.warning(f"Skipping position with invalid string fields: {pos}")
+                continue
+            amount_invested = float(safe_get(pos, "amount_invested", 0.0))
+            apy = float(safe_get(pos, "apy", 0.0))
+            if amount_invested < 0 or apy < 0:
+                logger.warning(f"Skipping position with negative amount_invested/apy: {pos}")
+                continue
+            cleaned_positions.append({
+                "id": pos["id"],
+                "chain": chain,
+                "opportunity_name": opportunity_name,
+                "token_symbol": token_symbol,
+                "protocol": protocol,
+                "amount_invested": amount_invested,
+                "apy": apy,
+                "status": status,
+                "tx_hash": tx_hash
+            })
+        except Exception as e:
+            logger.warning(f"Error processing position {safe_get(pos, 'id', 'unknown')}: {e}")
+            continue
+
+    if not cleaned_positions:
+        st.warning("No valid positions found.")
+        return
+
+    active_positions = [p for p in cleaned_positions if p["status"] == "active"]
+    closed_positions = [p for p in cleaned_positions if p["status"] == "closed"]
 
     try:
-        data_map = asyncio.run(fetch_positions_data(active_positions + closed_positions))
+        data_map = asyncio.run(fetch_positions_data(cleaned_positions))
     except Exception as e:
+        logger.warning(f"Failed to fetch price/gas data: {e}")
         st.warning(f"Failed to fetch price/gas data: {e}")
         data_map = {}
 
     # Summary cards
     total_invested = sum(pos["amount_invested"] for pos in active_positions)
     total_current_value = sum(
-        pos["amount_invested"] * data_map.get(pos["id"], {}).get("price", 0.0)
+        pos["amount_invested"] * float(safe_get(data_map.get(pos["id"], {}), "price", 0.0))
         for pos in active_positions
     )
     total_pnl = total_current_value - total_invested
@@ -247,15 +314,15 @@ def render():
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
             <div class="compact-card">
                 <h4 class="text-xs text-blue-300 mb-1">Total Invested</h4>
-                <p class="text-lg font-bold text-white">${total_invested:.2f}</p>
+                <p class="text-lg font-bold text-white">{format_number(total_invested)}</p>
             </div>
             <div class="compact-card">
                 <h4 class="text-xs text-green-300 mb-1">Current Value</h4>
-                <p class="text-lg font-bold text-white">${total_current_value:.2f}</p>
+                <p class="text-lg font-bold text-white">{format_number(total_current_value)}</p>
             </div>
             <div class="compact-card">
                 <h4 class="text-xs text-purple-300 mb-1">Total PnL</h4>
-                <p class="text-lg font-bold {'text-green-400' if total_pnl>=0 else 'text-red-400'}">${total_pnl:.2f}</p>
+                <p class="text-lg font-bold {'text-green-400' if total_pnl>=0 else 'text-red-400'}">{format_number(total_pnl)}</p>
                 <p class="text-xs {'text-green-400' if total_pnl>=0 else 'text-red-400'}">{total_pnl_pct:.2f}%</p>
             </div>
             <div class="compact-card">

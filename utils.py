@@ -115,21 +115,6 @@ async def get_short_term_opportunities(limit: int = 5) -> List[YieldEntry]:
     return [YieldEntry(**o) for o in sorted_opps[:limit]]
 
 
-async def get_layer2_opportunities(limit: int = 10) -> List[YieldEntry]:
-    L2_CHAINS = {"optimism", "arbitrum", "base", "zksync", "polygon"}
-    try:
-        entries = await fetch_yields()
-        l2_entries = [e for e in entries if e.chain.lower() in L2_CHAINS]
-        if l2_entries:
-            return l2_entries[:limit]
-    except Exception as e:
-        logging.error(f"Failed to fetch L2 opportunities: {e}")
-
-    opps = db.get_opportunities(limit=100)
-    l2_opps = [o for o in opps if o["chain"].lower() in L2_CHAINS]
-    return [YieldEntry(**o) for o in l2_opps[:limit]]
-
-
 async def get_long_term_opportunities(limit: int = 10) -> List[YieldEntry]:
     try:
         entries = await fetch_yields()
@@ -192,3 +177,39 @@ def format_number(value: float) -> str:
         return f"${value:,.2f}"
     except Exception:
         return str(value)
+
+import asyncio
+from functools import lru_cache
+
+@lru_cache(maxsize=128)
+def get_layer2_opportunities() -> List[Dict[str, Any]]:
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(async_get_layer2_opportunities())
+        loop.close()
+        return result
+    except Exception as e:
+        logger.error(f"Failed to fetch L2 opportunities: {e}")
+        return []
+
+async def async_get_layer2_opportunities() -> List[Dict[str, Any]]:
+    entries = await fetch_yields()  # Assume async API call
+    l2_chains = ["arbitrum", "optimism", "base"]
+    l2_entries = [e for e in entries if safe_get(e, "chain", "").lower() in l2_chains]
+    cleaned_entries = []
+    for e in l2_entries:
+        if not all(isinstance(safe_get(e, k, ""), str) for k in ["chain", "project", "symbol", "protocol"]):
+            continue
+        if float(safe_get(e, "apy", 0.0)) < 0 or float(safe_get(e, "tvl", 0.0)) < 0:
+            continue
+        cleaned_entries.append({
+            "chain": safe_get(e, "chain", "unknown"),
+            "project": safe_get(e, "project", "Unknown"),
+            "symbol": safe_get(e, "symbol", "Unknown"),
+            "protocol": safe_get(e, "protocol", "Unknown"),
+            "apy": float(safe_get(e, "apy", 0.0)),
+            "tvl": float(safe_get(e, "tvl", 0.0)),
+            "url": safe_get(e, "url", "#")
+        })
+    return cleaned_entries
